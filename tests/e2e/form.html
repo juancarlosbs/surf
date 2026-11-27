@@ -1,0 +1,7 @@
+<!doctype html><html><head><title>form</title></head><body>
+<h1>Form</h1>
+<label for="q">Search</label><input id="q" placeholder="Search">
+<div contenteditable="true" aria-label="Post text" style="width:300px;height:40px;border:1px solid"></div>
+<button id="go" onclick="document.getElementById('out').textContent='clicked '+document.getElementById('q').value; const b=document.createElement('button'); b.textContent='Undo'; document.body.appendChild(b)">Go</button>
+<p id="out">idle</p><p>footer text that should not appear in action diffs</p>
+</body></html>
