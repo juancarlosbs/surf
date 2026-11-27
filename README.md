@@ -50,3 +50,12 @@ export SURF_ATTACH_ONLY=1 SURF_PORT=9222
 - `SURF_BROWSER` — custom Chromium binary path
 - `SURF_HOME` — daemon socket, PID, and persistent profile directory (default: `~/.surf`)
 - `SURF_TIMEOUT_MS` — per-CDP-call timeout in ms (default: `15000`)
+
+## Development
+
+```bash
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo build && scripts/e2e.sh   # headless browser on an isolated port/profile (SURF_E2E_PORT, default 9444)
+```
+
+CI runs both on every PR.
