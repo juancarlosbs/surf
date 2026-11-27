@@ -125,6 +125,21 @@ pub enum WaitTarget {
     Text { text: String, timeout_ms: u64 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchConfig {
+    pub port: u16,
+    pub headless: bool,
+    pub attach_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    #[serde(flatten)]
+    pub req: Request,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Phase {
     pub name: String,

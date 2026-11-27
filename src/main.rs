@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use cli::{Cli, Command, command_to_request};
 use daemon::DaemonConfig;
-use protocol::{Request, Response};
+use protocol::{Envelope, Request, Response};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -45,7 +45,7 @@ async fn run() -> Result<()> {
     }
 
     let req = command_to_request(cli.command)?;
-    let resp = send_request(&cfg, &req).await?;
+    let resp = send_request(&cfg, req).await?;
 
     if cli.timing {
         print_timing(&resp);
@@ -70,7 +70,7 @@ fn print_timing(resp: &Response) {
     }
 }
 
-async fn send_request(cfg: &DaemonConfig, req: &Request) -> Result<Response> {
+async fn send_request(cfg: &DaemonConfig, req: Request) -> Result<Response> {
     let sock_path = cfg.socket_path();
 
     let stream = match UnixStream::connect(&sock_path).await {
@@ -85,7 +85,11 @@ async fn send_request(cfg: &DaemonConfig, req: &Request) -> Result<Response> {
     };
 
     let (reader, mut writer) = stream.into_split();
-    let mut payload = serde_json::to_string(req)?;
+    let envelope = Envelope {
+        req,
+        launch: Some(cfg.launch()),
+    };
+    let mut payload = serde_json::to_string(&envelope)?;
     payload.push('\n');
     writer.write_all(payload.as_bytes()).await?;
 
