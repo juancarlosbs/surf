@@ -144,18 +144,18 @@ async fn read_http_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
         }
         buf.extend_from_slice(&tmp[..n]);
 
-        if header_end.is_none() {
-            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                let end = pos + 4;
-                header_end = Some(end);
-                let head = String::from_utf8_lossy(&buf[..pos]);
-                for line in head.lines() {
-                    let lower = line.to_ascii_lowercase();
-                    if let Some(val) = lower.strip_prefix("content-length:") {
-                        content_length = val.trim().parse().ok();
-                    } else if lower.contains("transfer-encoding: chunked") {
-                        is_chunked = true;
-                    }
+        if header_end.is_none()
+            && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            let end = pos + 4;
+            header_end = Some(end);
+            let head = String::from_utf8_lossy(&buf[..pos]);
+            for line in head.lines() {
+                let lower = line.to_ascii_lowercase();
+                if let Some(val) = lower.strip_prefix("content-length:") {
+                    content_length = val.trim().parse().ok();
+                } else if lower.contains("transfer-encoding: chunked") {
+                    is_chunked = true;
                 }
             }
         }
