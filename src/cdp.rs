@@ -55,20 +55,16 @@ impl CdpClient {
                 let Ok(msg) = item else {
                     break;
                 };
-                if let Message::Text(text) = msg {
-                    if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                        if let Some(id) = val.get("id").and_then(|v| v.as_u64()) {
-                            let waiter = pending_reader.lock().await.remove(&id);
-                            if let Some(tx) = waiter {
-                                if let Some(err) = val.get("error") {
-                                    let _ = tx.send(Err(anyhow!("CDP error: {err}")));
-                                } else {
-                                    let _ = tx.send(Ok(val
-                                        .get("result")
-                                        .cloned()
-                                        .unwrap_or(Value::Null)));
-                                }
-                            }
+                if let Message::Text(text) = msg
+                    && let Ok(val) = serde_json::from_str::<Value>(&text)
+                    && let Some(id) = val.get("id").and_then(|v| v.as_u64())
+                {
+                    let waiter = pending_reader.lock().await.remove(&id);
+                    if let Some(tx) = waiter {
+                        if let Some(err) = val.get("error") {
+                            let _ = tx.send(Err(anyhow!("CDP error: {err}")));
+                        } else {
+                            let _ = tx.send(Ok(val.get("result").cloned().unwrap_or(Value::Null)));
                         }
                     }
                 }
@@ -158,11 +154,11 @@ impl CdpClient {
     pub async fn wait_ready(&self, timeout_ms: u64) -> Result<()> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         while tokio::time::Instant::now() < deadline {
-            if let Ok(Value::String(state)) = self.eval_value("document.readyState").await {
-                if state == "complete" || state == "interactive" {
-                    tokio::time::sleep(Duration::from_millis(80)).await;
-                    return Ok(());
-                }
+            if let Ok(Value::String(state)) = self.eval_value("document.readyState").await
+                && (state == "complete" || state == "interactive")
+            {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

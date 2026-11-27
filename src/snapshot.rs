@@ -123,11 +123,11 @@ pub fn diff_snapshots(prev: &str, curr: &str) -> String {
 
     let prev_url = prev_lines.iter().find(|l| l.starts_with("url: "));
     let curr_url = curr_lines.iter().find(|l| l.starts_with("url: "));
-    if prev_url != curr_url {
-        if let Some(u) = curr_url {
-            out.push_str(u);
-            out.push('\n');
-        }
+    if prev_url != curr_url
+        && let Some(u) = curr_url
+    {
+        out.push_str(u);
+        out.push('\n');
     }
 
     let mut changes = 0usize;
