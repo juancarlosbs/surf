@@ -1,7 +1,9 @@
-use crate::browser;
+use crate::browser::{self, LaunchPolicy};
 use crate::cdp::CdpClient;
-use crate::protocol::{Request, Response, ScrollDirection, SnapOptions, WaitTarget};
-use crate::snapshot::{build_snapshot_expr, diff_snapshots, format_snapshot};
+use crate::protocol::{Phase, Request, Response, ScrollDirection, SnapOptions, WaitTarget};
+use crate::snapshot::{
+    build_snapshot_expr, diff_snapshots, parse_snapshot, render_interactive, render_snapshot,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -13,10 +15,29 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 const RESOLVE_LABEL_JS: &str = include_str!("js/resolve_label.js");
+const FOCUSED_VALUE_JS: &str = "(() => {
+    let el = document.activeElement;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+    if (!el || el === document.body) return null;
+    if (el.isContentEditable) return el.innerText;
+    return typeof el.value === 'string' ? el.value : null;
+})()";
+
+// Receipt (2026-11-27, headless Chrome, React 18.3.1): click -> first DOM mutation 0.5-2.7ms sync,
+// 51.7-53.7ms when the handler defers via setTimeout(0). 120ms covers the deferred path ~2x.
+const POST_CLICK_SETTLE: Duration = Duration::from_millis(120);
+// Receipt (same run): controlled-input re-render after Input.insertText 1.5ms.
+const POST_FILL_SETTLE: Duration = Duration::from_millis(80);
+// Tripwire for elements rendered after async work; anything slower belongs to `surf wait`.
+const LABEL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const LABEL_POLL_INTERVAL: Duration = Duration::from_millis(80);
+const WAIT_TEXT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const FILL_ECHO_MAX_CHARS: usize = 200;
 
 pub struct DaemonConfig {
     pub port: u16,
     pub headless: bool,
+    pub attach_only: bool,
     pub home_dir: PathBuf,
 }
 
@@ -37,11 +58,27 @@ impl DaemonConfig {
 struct SessionState {
     port: u16,
     headless: bool,
+    attach_only: bool,
     profile_dir: PathBuf,
     active_target_id: Option<String>,
     cdp: Option<CdpClient>,
     last_snapshots: HashMap<String, String>,
     should_stop: bool,
+    defer_snap: bool,
+    step_label: Option<String>,
+    phases: Vec<Phase>,
+}
+
+fn action_snap_opts(diff: bool) -> SnapOptions {
+    if diff {
+        SnapOptions {
+            diff: true,
+            max_text_chars: 0,
+            ..Default::default()
+        }
+    } else {
+        SnapOptions::default()
+    }
 }
 
 impl SessionState {
@@ -49,16 +86,45 @@ impl SessionState {
         Self {
             port: cfg.port,
             headless: cfg.headless,
+            attach_only: cfg.attach_only,
             profile_dir: cfg.profile_dir(),
             active_target_id: None,
             cdp: None,
             last_snapshots: HashMap::new(),
             should_stop: false,
+            defer_snap: false,
+            step_label: None,
+            phases: Vec::new(),
         }
     }
 
+    fn launch_policy(&self) -> LaunchPolicy<'_> {
+        LaunchPolicy {
+            headless: self.headless,
+            attach_only: self.attach_only,
+            profile_dir: &self.profile_dir,
+        }
+    }
+
+    fn mark(&mut self, name: &str, since: Instant) {
+        let name = match &self.step_label {
+            Some(step) => format!("{step} {name}"),
+            None => name.to_string(),
+        };
+        self.phases.push(Phase {
+            name,
+            us: since.elapsed().as_micros() as u64,
+        });
+    }
+
     async fn ensure_cdp(&mut self) -> Result<&CdpClient> {
-        browser::ensure_browser(self.port, self.headless, &self.profile_dir).await?;
+        if self.cdp.as_ref().is_some_and(CdpClient::is_alive) {
+            return Ok(self.cdp.as_ref().expect("checked alive"));
+        }
+
+        let start = Instant::now();
+        self.cdp = None;
+        browser::ensure_browser(self.port, &self.launch_policy()).await?;
 
         let mut targets = browser::list_page_targets(self.port).await?;
         if targets.is_empty() {
@@ -66,57 +132,75 @@ impl SessionState {
             targets.push(t);
         }
 
-        let target = if let Some(ref active_id) = self.active_target_id {
-            targets
-                .iter()
-                .find(|t| &t.id == active_id)
-                .cloned()
-                .unwrap_or_else(|| targets[0].clone())
-        } else {
-            targets[0].clone()
-        };
+        let target = self
+            .active_target_id
+            .as_ref()
+            .and_then(|active_id| targets.iter().find(|t| &t.id == active_id))
+            .unwrap_or(&targets[0])
+            .clone();
 
         let ws_url = target
             .web_socket_debugger_url
             .clone()
             .ok_or_else(|| anyhow!("target {} has no webSocketDebuggerUrl", target.id))?;
 
-        let needs_reconnect = match &self.cdp {
-            Some(client) => client.ws_url() != ws_url,
-            None => true,
-        };
-
-        if needs_reconnect {
-            let client = CdpClient::connect(&ws_url).await?;
-            self.cdp = Some(client);
-            self.active_target_id = Some(target.id);
-        }
-
+        self.cdp = Some(CdpClient::connect(&ws_url).await?);
+        self.active_target_id = Some(target.id);
+        self.mark("cdp_discover", start);
         Ok(self.cdp.as_ref().expect("cdp initialized"))
     }
 
     async fn take_snap(&mut self, opts: &SnapOptions) -> Result<String> {
+        if self.defer_snap {
+            return Ok(String::new());
+        }
         let expr = build_snapshot_expr(opts);
-        let val = {
-            let cdp = self.ensure_cdp().await?;
-            cdp.eval_value(&expr).await?
-        };
-        let rendered = format_snapshot(val, opts)?;
+        let cdp = self.ensure_cdp().await?;
+        let start = Instant::now();
+        let val = cdp.eval_value(&expr).await?;
+        let snap = parse_snapshot(val)?;
+        let interactive = render_interactive(&snap);
         let key = self
             .active_target_id
             .clone()
             .unwrap_or_else(|| "default".into());
 
-        let out = if opts.diff {
-            match self.last_snapshots.get(&key) {
-                Some(prev) => diff_snapshots(prev, &rendered),
-                None => rendered.clone(),
-            }
-        } else {
-            rendered.clone()
+        let out = match self.last_snapshots.get(&key) {
+            Some(prev) if opts.diff => diff_snapshots(prev, &interactive),
+            _ => render_snapshot(&snap, opts),
         };
 
-        self.last_snapshots.insert(key, rendered);
+        self.last_snapshots.insert(key, interactive);
+        self.mark("snapshot", start);
+        Ok(out)
+    }
+
+    async fn settle(&mut self, dur: Duration) {
+        let start = Instant::now();
+        tokio::time::sleep(dur).await;
+        self.mark("settle", start);
+    }
+
+    async fn click_at(&mut self, x: f64, y: f64, diff: bool) -> Result<String> {
+        let start = Instant::now();
+        self.ensure_cdp().await?.click_point(x, y).await?;
+        self.mark("click", start);
+        self.settle(POST_CLICK_SETTLE).await;
+        self.take_snap(&action_snap_opts(diff)).await
+    }
+
+    async fn type_into_focused(&mut self, target: &str, text: &str, diff: bool) -> Result<String> {
+        let start = Instant::now();
+        self.ensure_cdp().await?.insert_text(text).await?;
+        self.mark("input", start);
+        self.settle(POST_FILL_SETTLE).await;
+        let value = self
+            .ensure_cdp()
+            .await?
+            .eval_value(FOCUSED_VALUE_JS)
+            .await?;
+        let mut out = fill_confirmation(target, text, &value);
+        out.push_str(&self.take_snap(&action_snap_opts(diff)).await?);
         Ok(out)
     }
 
@@ -127,13 +211,17 @@ impl SessionState {
                 let tabs = browser::list_page_targets(self.port)
                     .await
                     .unwrap_or_default();
-                let browser_info = ver
-                    .map(|v| v.browser)
-                    .unwrap_or_else(|| "not running (will auto-launch)".into());
+                let not_running = if self.attach_only {
+                    "not running (attach-only: will not launch)"
+                } else {
+                    "not running (will auto-launch)"
+                };
+                let browser_info = ver.map(|v| v.browser).unwrap_or_else(|| not_running.into());
                 Ok(format!(
-                    "daemon: running (pid {})\ncdp_port: {}\nbrowser: {}\ntabs: {}\nactive_tab: {}\n",
+                    "daemon: running (pid {})\ncdp_port: {}\nattach_only: {}\nbrowser: {}\ntabs: {}\nactive_tab: {}\n",
                     std::process::id(),
                     self.port,
+                    self.attach_only,
                     browser_info,
                     tabs.len(),
                     self.active_target_id.as_deref().unwrap_or("none")
@@ -145,70 +233,42 @@ impl SessionState {
             }
             Request::Open { url, snap } => {
                 let normalized = normalize_url(&url);
-                {
-                    let cdp = self.ensure_cdp().await?;
-                    cdp.navigate(&normalized).await?;
-                }
+                let cdp = self.ensure_cdp().await?;
+                let start = Instant::now();
+                cdp.navigate(&normalized).await?;
+                self.mark("navigate", start);
                 self.take_snap(&snap).await
             }
             Request::Snap { opts } => self.take_snap(&opts).await,
             Request::Click { ref_id, diff } => {
-                let (x, y) = {
-                    let cdp = self.ensure_cdp().await?;
-                    resolve_ref_point(cdp, ref_id).await?
-                };
-                {
-                    let cdp = self.ensure_cdp().await?;
-                    cdp.click_point(x, y).await?;
-                }
-                tokio::time::sleep(Duration::from_millis(120)).await;
-                let opts = SnapOptions {
-                    diff,
-                    ..Default::default()
-                };
-                self.take_snap(&opts).await
+                let cdp = self.ensure_cdp().await?;
+                let start = Instant::now();
+                let (x, y) = resolve_ref_point(cdp, ref_id).await?;
+                self.mark("resolve", start);
+                self.click_at(x, y, diff).await
             }
             Request::ClickLabel { label, diff } => {
-                let (x, y) = {
-                    let cdp = self.ensure_cdp().await?;
-                    resolve_label_point(cdp, &label).await?
-                };
-                {
-                    let cdp = self.ensure_cdp().await?;
-                    cdp.click_point(x, y).await?;
-                }
-                tokio::time::sleep(Duration::from_millis(120)).await;
-                let opts = SnapOptions {
-                    diff,
-                    ..Default::default()
-                };
-                self.take_snap(&opts).await
+                let cdp = self.ensure_cdp().await?;
+                let start = Instant::now();
+                let (x, y) = resolve_label_point(cdp, &label).await?;
+                self.mark("resolve", start);
+                self.click_at(x, y, diff).await
             }
             Request::Fill { ref_id, text, diff } => {
-                {
-                    let cdp = self.ensure_cdp().await?;
-                    focus_and_clear_ref(cdp, ref_id).await?;
-                    cdp.insert_text(&text).await?;
-                }
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                let opts = SnapOptions {
-                    diff,
-                    ..Default::default()
-                };
-                self.take_snap(&opts).await
+                let cdp = self.ensure_cdp().await?;
+                let start = Instant::now();
+                focus_and_clear_ref(cdp, ref_id).await?;
+                self.mark("resolve", start);
+                self.type_into_focused(&format!("@{ref_id}"), &text, diff)
+                    .await
             }
             Request::FillLabel { label, text, diff } => {
-                {
-                    let cdp = self.ensure_cdp().await?;
-                    focus_and_clear_label(cdp, &label).await?;
-                    cdp.insert_text(&text).await?;
-                }
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                let opts = SnapOptions {
-                    diff,
-                    ..Default::default()
-                };
-                self.take_snap(&opts).await
+                let cdp = self.ensure_cdp().await?;
+                let start = Instant::now();
+                focus_and_clear_label(cdp, &label).await?;
+                self.mark("resolve", start);
+                self.type_into_focused(&json!(label).to_string(), &text, diff)
+                    .await
             }
             Request::Type { text } => {
                 let cdp = self.ensure_cdp().await?;
@@ -222,7 +282,9 @@ impl SessionState {
             }
             Request::Scroll { direction, amount } => {
                 let expr = match direction {
-                    ScrollDirection::Down => format!("window.scrollBy(0, {amount}); window.scrollY"),
+                    ScrollDirection::Down => {
+                        format!("window.scrollBy(0, {amount}); window.scrollY")
+                    }
                     ScrollDirection::Up => format!("window.scrollBy(0, -{amount}); window.scrollY"),
                     ScrollDirection::Top => "window.scrollTo(0, 0); window.scrollY".into(),
                     ScrollDirection::Bottom => {
@@ -265,7 +327,7 @@ impl SessionState {
                         if cdp.eval_value(&expr).await? == Value::Bool(true) {
                             return Ok(format!("found text: {text}\n"));
                         }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(WAIT_TEXT_POLL_INTERVAL).await;
                     }
                     bail!("wait_text_timeout={timeout_ms}ms exceeded waiting for \"{text}\"")
                 }
@@ -288,7 +350,7 @@ impl SessionState {
                 Ok(format!("saved {out_path}\n"))
             }
             Request::Tabs => {
-                browser::ensure_browser(self.port, self.headless, &self.profile_dir).await?;
+                browser::ensure_browser(self.port, &self.launch_policy()).await?;
                 let tabs = browser::list_page_targets(self.port).await?;
                 let mut out = String::new();
                 for (i, t) in tabs.iter().enumerate() {
@@ -312,14 +374,21 @@ impl SessionState {
                 self.take_snap(&SnapOptions::default()).await
             }
             Request::TabNew { url } => {
-                browser::ensure_browser(self.port, self.headless, &self.profile_dir).await?;
+                browser::ensure_browser(self.port, &self.launch_policy()).await?;
                 let normalized = url.as_deref().map(normalize_url);
                 let target = browser::open_new_tab(self.port, normalized.as_deref()).await?;
+                let url_ignored = target.url.is_empty() || target.url == "about:blank";
                 self.active_target_id = Some(target.id);
                 self.cdp = None;
-                if normalized.is_some() {
+                if let Some(url) = normalized.filter(|u| u != "about:blank") {
                     let cdp = self.ensure_cdp().await?;
-                    cdp.wait_ready(10_000).await?;
+                    let start = Instant::now();
+                    if url_ignored {
+                        cdp.navigate(&url).await?;
+                    } else {
+                        cdp.wait_ready(10_000).await?;
+                    }
+                    self.mark("navigate", start);
                 }
                 self.take_snap(&SnapOptions::default()).await
             }
@@ -346,15 +415,57 @@ impl SessionState {
                 let total = steps.len();
                 let mut last_out = String::new();
                 for (i, step) in steps.into_iter().enumerate() {
-                    match Box::pin(self.handle(step)).await {
+                    let is_last = i + 1 == total;
+                    let cmd = request_name(&step);
+                    self.defer_snap = !is_last && !matches!(step, Request::Snap { .. });
+                    self.step_label = Some(format!("step{}/{total}", i + 1));
+                    let start = Instant::now();
+                    let res = Box::pin(self.handle(step)).await;
+                    self.mark(&cmd, start);
+                    self.defer_snap = false;
+                    self.step_label = None;
+                    match res {
                         Ok(out) => last_out = out,
-                        Err(e) => bail!("batch step {}/{total} failed: {e}", i + 1),
+                        Err(e) => bail!("batch step {}/{total} ({cmd}) failed: {e}", i + 1),
                     }
                 }
                 Ok(last_out)
             }
         }
     }
+}
+
+fn request_name(req: &Request) -> String {
+    serde_json::to_value(req)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(Value::as_str).map(String::from))
+        .unwrap_or_else(|| "step".into())
+}
+
+fn quoted_prefix(s: &str) -> String {
+    let shown: String = s.chars().take(FILL_ECHO_MAX_CHARS).collect();
+    json!(shown).to_string()
+}
+
+fn fill_confirmation(target: &str, requested: &str, value: &Value) -> String {
+    let Some(actual) = value.as_str() else {
+        return format!("filled {target} (focused element value not readable)\n");
+    };
+    let total = actual.chars().count();
+    let mut out = format!("filled {target} val={}", quoted_prefix(actual));
+    if total > FILL_ECHO_MAX_CHARS {
+        out.push_str(&format!(
+            " [truncated: showing {FILL_ECHO_MAX_CHARS}/{total} chars; use `surf eval` for the full value]"
+        ));
+    }
+    out.push('\n');
+    if actual.trim_end() != requested.trim_end() {
+        out.push_str(&format!(
+            "warning: field value differs from requested text (requested={})\n",
+            quoted_prefix(requested)
+        ));
+    }
+    out
 }
 
 async fn resolve_ref_point(cdp: &CdpClient, ref_id: u32) -> Result<(f64, f64)> {
@@ -409,8 +520,7 @@ async fn focus_and_clear_ref(cdp: &CdpClient, ref_id: u32) -> Result<()> {
 async fn resolve_label_point(cdp: &CdpClient, label: &str) -> Result<(f64, f64)> {
     let args = json!({ "query": label, "mode": "click" });
     let expr = format!("({RESOLVE_LABEL_JS})({args})");
-    let timeout_ms: u64 = 5_000;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let deadline = tokio::time::Instant::now() + LABEL_WAIT_TIMEOUT;
 
     loop {
         let val = cdp.eval_value(&expr).await?;
@@ -421,18 +531,18 @@ async fn resolve_label_point(cdp: &CdpClient, label: &str) -> Result<(f64, f64)>
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "click-label_timeout={timeout_ms}ms: no visible element matching \"{label}\" (run `surf snap` to inspect)"
+                "click-label_timeout={}ms: no visible element matching \"{label}\" (run `surf snap` to inspect)",
+                LABEL_WAIT_TIMEOUT.as_millis()
             );
         }
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        tokio::time::sleep(LABEL_POLL_INTERVAL).await;
     }
 }
 
 async fn focus_and_clear_label(cdp: &CdpClient, label: &str) -> Result<()> {
     let args = json!({ "query": label, "mode": "fill" });
     let expr = format!("({RESOLVE_LABEL_JS})({args})");
-    let timeout_ms: u64 = 5_000;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let deadline = tokio::time::Instant::now() + LABEL_WAIT_TIMEOUT;
 
     let val = loop {
         let val = cdp.eval_value(&expr).await?;
@@ -441,10 +551,11 @@ async fn focus_and_clear_label(cdp: &CdpClient, label: &str) -> Result<()> {
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "fill-label_timeout={timeout_ms}ms: no visible editable element matching \"{label}\" (run `surf snap` to inspect)"
+                "fill-label_timeout={}ms: no visible editable element matching \"{label}\" (run `surf snap` to inspect)",
+                LABEL_WAIT_TIMEOUT.as_millis()
             );
         }
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        tokio::time::sleep(LABEL_POLL_INTERVAL).await;
     };
 
     let is_content_editable = val
@@ -558,10 +669,14 @@ async fn handle_conn(stream: UnixStream, state: Arc<Mutex<SessionState>>) -> boo
         let resp = match serde_json::from_str::<Request>(&line) {
             Ok(req) => {
                 let mut guard = state.lock().await;
-                match guard.handle(req).await {
-                    Ok(out) => Response::ok(out, start.elapsed().as_millis() as u64),
-                    Err(e) => Response::err(e.to_string(), start.elapsed().as_millis() as u64),
-                }
+                let res = guard.handle(req).await;
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let mut resp = match res {
+                    Ok(out) => Response::ok(out, elapsed_ms),
+                    Err(e) => Response::err(e.to_string(), elapsed_ms),
+                };
+                resp.phases = std::mem::take(&mut guard.phases);
+                resp
             }
             Err(e) => Response::err(
                 format!("invalid request JSON: {e}"),
@@ -582,4 +697,38 @@ async fn handle_conn(stream: UnixStream, state: Arc<Mutex<SessionState>>) -> boo
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fill_confirmation_echoes_dom_value() {
+        let out = fill_confirmation("\"Post text\"", "hi", &json!("hi"));
+        assert_eq!(out, "filled \"Post text\" val=\"hi\"\n");
+    }
+
+    #[test]
+    fn fill_confirmation_warns_on_mismatch_and_truncates() {
+        let long = "x".repeat(FILL_ECHO_MAX_CHARS + 5);
+        let out = fill_confirmation("@3", "y", &json!(long));
+        assert!(out.contains(&format!(
+            "showing {FILL_ECHO_MAX_CHARS}/{} chars",
+            FILL_ECHO_MAX_CHARS + 5
+        )));
+        assert!(out.contains("warning: field value differs from requested text (requested=\"y\")"));
+    }
+
+    #[test]
+    fn fill_confirmation_handles_unreadable_value() {
+        let out = fill_confirmation("@1", "a", &Value::Null);
+        assert!(out.contains("not readable"));
+    }
+
+    #[test]
+    fn action_diffs_skip_page_text() {
+        assert_eq!(action_snap_opts(true).max_text_chars, 0);
+        assert!(action_snap_opts(false).max_text_chars > 0);
+    }
 }

@@ -29,6 +29,7 @@ async fn run() -> Result<()> {
     let cfg = DaemonConfig {
         port: cli.port,
         headless: cli.headless,
+        attach_only: cli.attach_only,
         home_dir,
     };
 
@@ -46,9 +47,7 @@ async fn run() -> Result<()> {
     let resp = send_request(&cfg, &req).await?;
 
     if cli.timing {
-        if let Some(ms) = resp.elapsed_ms {
-            eprintln!("[surf: {ms}ms]");
-        }
+        print_timing(&resp);
     }
 
     if resp.ok {
@@ -58,6 +57,15 @@ async fn run() -> Result<()> {
         Ok(())
     } else {
         bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()))
+    }
+}
+
+fn print_timing(resp: &Response) {
+    if let Some(ms) = resp.elapsed_ms {
+        eprintln!("[surf: {ms}ms]");
+    }
+    for phase in &resp.phases {
+        eprintln!("  {} {:.1}ms", phase.name, phase.us as f64 / 1000.0);
     }
 }
 
@@ -103,6 +111,9 @@ fn spawn_daemon(cfg: &DaemonConfig) -> Result<()> {
 
     if cfg.headless {
         cmd.arg("--headless");
+    }
+    if cfg.attach_only {
+        cmd.arg("--attach");
     }
 
     cmd.spawn().context("failed to spawn surf daemon")?;

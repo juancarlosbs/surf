@@ -7,6 +7,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 
+// Receipts (2026-11-27, M-series mac, headless Chrome): loopback discovery round trip <6ms,
+// cold boot to first /json/version 867ms. Limits sit >100x / ~11x past those as tripwires.
+const CDP_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const CDP_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_BOOT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Target {
@@ -75,19 +81,28 @@ pub fn find_browser_binary() -> Result<PathBuf> {
 
 pub async fn http_request(port: u16, method: &str, path: &str) -> Result<(u16, String)> {
     let addr = format!("127.0.0.1:{port}");
-    let mut stream = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&addr))
+    let mut stream = tokio::time::timeout(CDP_HTTP_CONNECT_TIMEOUT, TcpStream::connect(&addr))
         .await
-        .map_err(|_| anyhow!("CDP connect timeout (2000ms) on {addr}"))?
+        .map_err(|_| {
+            anyhow!(
+                "cdp_http_connect_timeout={}ms exceeded on {addr}",
+                CDP_HTTP_CONNECT_TIMEOUT.as_millis()
+            )
+        })?
         .with_context(|| format!("failed to connect to CDP at {addr}"))?;
 
-    let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    );
+    let req =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).await?;
 
-    let raw = tokio::time::timeout(Duration::from_secs(5), read_http_response(&mut stream))
+    let raw = tokio::time::timeout(CDP_HTTP_READ_TIMEOUT, read_http_response(&mut stream))
         .await
-        .map_err(|_| anyhow!("CDP HTTP read timeout (5000ms) for {method} {path}"))??;
+        .map_err(|_| {
+            anyhow!(
+                "cdp_http_read_timeout={}ms exceeded for {method} {path}",
+                CDP_HTTP_READ_TIMEOUT.as_millis()
+            )
+        })??;
 
     let text = String::from_utf8_lossy(&raw);
     let (head, body) = text
@@ -101,9 +116,10 @@ pub async fn http_request(port: u16, method: &str, path: &str) -> Result<(u16, S
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let is_chunked = head
-        .lines()
-        .any(|l| l.to_ascii_lowercase().contains("transfer-encoding: chunked"));
+    let is_chunked = head.lines().any(|l| {
+        l.to_ascii_lowercase()
+            .contains("transfer-encoding: chunked")
+    });
 
     let decoded = if is_chunked {
         decode_chunked(body)
@@ -232,7 +248,12 @@ pub async fn activate_tab(port: u16, target_id: &str) -> Result<()> {
 fn percent_encode_url(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for b in input.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b'?' | b'&' | b'=' | b'#' | b'%') {
+        if b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b'?' | b'&' | b'=' | b'#' | b'%'
+            )
+        {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -241,12 +262,39 @@ fn percent_encode_url(input: &str) -> String {
     out
 }
 
-pub async fn ensure_browser(port: u16, headless: bool, profile_dir: &Path) -> Result<BrowserVersion> {
-    if let Ok(ver) = get_version(port).await {
-        return Ok(ver);
+fn is_connection_refused(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+    })
+}
+
+pub struct LaunchPolicy<'a> {
+    pub headless: bool,
+    pub attach_only: bool,
+    pub profile_dir: &'a Path,
+}
+
+pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<BrowserVersion> {
+    match get_version(port).await {
+        Ok(ver) => return Ok(ver),
+        Err(e) if !is_connection_refused(&e) => {
+            return Err(e.context(format!(
+                "127.0.0.1:{port} accepts connections but is not a usable CDP endpoint; refusing to launch another browser on an occupied port"
+            )));
+        }
+        Err(_) => {}
+    }
+
+    if policy.attach_only {
+        bail!(
+            "no CDP browser listening on 127.0.0.1:{port} (attach-only mode via --attach/SURF_ATTACH_ONLY; start your browser with --remote-debugging-port={port})"
+        );
     }
 
     let bin = find_browser_binary()?;
+    let profile_dir = policy.profile_dir;
     std::fs::create_dir_all(profile_dir)
         .with_context(|| format!("failed to create profile dir {}", profile_dir.display()))?;
 
@@ -262,16 +310,15 @@ pub async fn ensure_browser(port: u16, headless: bool, profile_dir: &Path) -> Re
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    if headless {
+    if policy.headless {
         cmd.arg("--headless=new");
     }
 
     cmd.spawn()
         .with_context(|| format!("failed to launch browser {}", bin.display()))?;
 
-    let timeout = Duration::from_secs(10);
     let start = Instant::now();
-    while start.elapsed() < timeout {
+    while start.elapsed() < BROWSER_BOOT_TIMEOUT {
         if let Ok(ver) = get_version(port).await {
             return Ok(ver);
         }
@@ -279,7 +326,53 @@ pub async fn ensure_browser(port: u16, headless: bool, profile_dir: &Path) -> Re
     }
 
     bail!(
-        "browser_boot_timeout=10000ms exceeded waiting for CDP on 127.0.0.1:{port} (binary: {})",
+        "browser_boot_timeout={}ms exceeded waiting for CDP on 127.0.0.1:{port} (binary: {}). Set SURF_BROWSER=/path/to/browser to launch another binary, or start your browser with --remote-debugging-port={port} and pass --attach",
+        BROWSER_BOOT_TIMEOUT.as_millis(),
         bin.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn attach_only_fails_fast_without_launching() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let dir = std::env::temp_dir();
+        let policy = LaunchPolicy {
+            headless: true,
+            attach_only: true,
+            profile_dir: &dir,
+        };
+        let err = ensure_browser(port, &policy).await.unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("no CDP browser listening on 127.0.0.1:{port}")),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn occupied_non_cdp_port_is_not_treated_as_free() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let _ = sock
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let dir = std::env::temp_dir();
+        let policy = LaunchPolicy {
+            headless: true,
+            attach_only: false,
+            profile_dir: &dir,
+        };
+        let err = format!("{:#}", ensure_browser(port, &policy).await.unwrap_err());
+        assert!(err.contains("refusing to launch another browser"), "{err}");
+        assert!(err.contains("HTTP 404"), "{err}");
+    }
 }
