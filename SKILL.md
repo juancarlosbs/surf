@@ -61,6 +61,7 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 - Action diffs (`click`, `fill`, ...) cover interactive elements only; page text comes only from `surf open` / `surf snap`.
 - Inside `surf run`, only the last step (and explicit `snap` steps) take a snapshot. Refs from your last snapshot stay valid until the page navigates or re-renders that element. After an `open` (or `tab`) inside a batch, use `click-label`/`fill-label` or add a `snap` step before using `@N`.
 - `--attach`, `--headless` and `--port` apply to each command, even when the daemon is already running.
+- Driving an existing browser (e.g. Dia/Chrome on 9222)? Set `SURF_ATTACH_ONLY=1` and `SURF_PORT` in the agent environment instead of passing `--attach` per call: a command without it may auto-launch a separate browser.
 
 ## Safety (logged-in sessions)
 `surf` drives the user's real, logged-in browser (X, GitHub, Gmail, ...).
