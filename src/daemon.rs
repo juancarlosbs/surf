@@ -199,10 +199,7 @@ impl SessionState {
         let val = cdp.eval_value(&expr).await?;
         let snap = parse_snapshot(val)?;
         let interactive = render_interactive(&snap);
-        let key = self
-            .active_target_id
-            .clone()
-            .unwrap_or_else(|| "default".into());
+        let key = self.baseline_key();
 
         let out = match self.last_snapshots.get(&key) {
             Some(prev) if opts.diff => diff_snapshots(prev, &interactive),
@@ -212,6 +209,12 @@ impl SessionState {
         self.last_snapshots.insert(key, interactive);
         self.mark("snapshot", start);
         Ok(out)
+    }
+
+    fn baseline_key(&self) -> String {
+        self.active_target_id
+            .clone()
+            .unwrap_or_else(|| "default".into())
     }
 
     async fn settle(&mut self, dur: Duration) {
@@ -276,6 +279,8 @@ impl SessionState {
                 let start = Instant::now();
                 cdp.navigate(&normalized).await?;
                 self.mark("navigate", start);
+                let key = self.baseline_key();
+                self.last_snapshots.remove(&key);
                 self.take_snap(&snap).await
             }
             Request::Snap { opts } => self.take_snap(&opts).await,
