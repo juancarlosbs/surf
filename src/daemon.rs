@@ -33,6 +33,8 @@ const LABEL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const LABEL_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const WAIT_TEXT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FILL_ECHO_MAX_CHARS: usize = 200;
+// sockaddr_un.sun_path is 104 bytes on macOS/BSD and 108 on Linux, including the trailing NUL.
+const MAX_UNIX_SOCKET_PATH_BYTES: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
 
 pub struct DaemonConfig {
     pub port: u16,
@@ -44,6 +46,22 @@ pub struct DaemonConfig {
 impl DaemonConfig {
     pub fn socket_path(&self) -> PathBuf {
         self.home_dir.join("daemon.sock")
+    }
+
+    pub fn log_path(&self) -> PathBuf {
+        self.home_dir.join("daemon.log")
+    }
+
+    pub fn check_socket_path(&self) -> Result<()> {
+        let sock_path = self.socket_path();
+        let len = sock_path.as_os_str().len();
+        if len > MAX_UNIX_SOCKET_PATH_BYTES {
+            bail!(
+                "socket_path_len={len} exceeds unix limit {MAX_UNIX_SOCKET_PATH_BYTES} bytes ({}); set a shorter SURF_HOME",
+                sock_path.display()
+            );
+        }
+        Ok(())
     }
 
     pub fn pid_path(&self) -> PathBuf {
@@ -702,6 +720,32 @@ async fn handle_conn(stream: UnixStream, state: Arc<Mutex<SessionState>>) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg_with_home(home: &str) -> DaemonConfig {
+        DaemonConfig {
+            port: 9222,
+            headless: false,
+            attach_only: false,
+            home_dir: PathBuf::from(home),
+        }
+    }
+
+    #[test]
+    fn rejects_socket_path_over_unix_limit() {
+        let long_home = "h".repeat(MAX_UNIX_SOCKET_PATH_BYTES);
+        let err = cfg_with_home(&long_home)
+            .check_socket_path()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!(
+                "exceeds unix limit {MAX_UNIX_SOCKET_PATH_BYTES} bytes"
+            )),
+            "{err}"
+        );
+        assert!(err.contains("SURF_HOME"), "{err}");
+        assert!(cfg_with_home("/tmp/surf").check_socket_path().is_ok());
+    }
 
     #[test]
     fn fill_confirmation_echoes_dom_value() {
