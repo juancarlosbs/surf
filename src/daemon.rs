@@ -1,6 +1,8 @@
 use crate::browser::{self, LaunchPolicy};
 use crate::cdp::CdpClient;
-use crate::protocol::{Phase, Request, Response, ScrollDirection, SnapOptions, WaitTarget};
+use crate::protocol::{
+    Envelope, LaunchConfig, Phase, Request, Response, ScrollDirection, SnapOptions, WaitTarget,
+};
 use crate::snapshot::{
     build_snapshot_expr, diff_snapshots, parse_snapshot, render_interactive, render_snapshot,
 };
@@ -44,6 +46,14 @@ pub struct DaemonConfig {
 impl DaemonConfig {
     pub fn socket_path(&self) -> PathBuf {
         self.home_dir.join("daemon.sock")
+    }
+
+    pub fn launch(&self) -> LaunchConfig {
+        LaunchConfig {
+            port: self.port,
+            headless: self.headless,
+            attach_only: self.attach_only,
+        }
     }
 
     pub fn pid_path(&self) -> PathBuf {
@@ -96,6 +106,17 @@ impl SessionState {
             step_label: None,
             phases: Vec::new(),
         }
+    }
+
+    fn apply_launch(&mut self, launch: LaunchConfig) {
+        if launch.port != self.port {
+            self.port = launch.port;
+            self.cdp = None;
+            self.active_target_id = None;
+            self.last_snapshots.clear();
+        }
+        self.headless = launch.headless;
+        self.attach_only = launch.attach_only;
     }
 
     fn launch_policy(&self) -> LaunchPolicy<'_> {
@@ -666,9 +687,12 @@ async fn handle_conn(stream: UnixStream, state: Arc<Mutex<SessionState>>) -> boo
             continue;
         }
         let start = Instant::now();
-        let resp = match serde_json::from_str::<Request>(&line) {
-            Ok(req) => {
+        let resp = match serde_json::from_str::<Envelope>(&line) {
+            Ok(Envelope { req, launch }) => {
                 let mut guard = state.lock().await;
+                if let Some(launch) = launch {
+                    guard.apply_launch(launch);
+                }
                 let res = guard.handle(req).await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 let mut resp = match res {
@@ -702,6 +726,49 @@ async fn handle_conn(stream: UnixStream, state: Arc<Mutex<SessionState>>) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_accepts_requests_with_and_without_launch() {
+        let env: Envelope = serde_json::from_str(
+            r#"{"cmd":"status","launch":{"port":9333,"headless":true,"attach_only":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(env.req, Request::Status));
+        assert_eq!(env.launch.unwrap().port, 9333);
+
+        let env: Envelope = serde_json::from_str(r#"{"cmd":"click","ref_id":3}"#).unwrap();
+        assert!(matches!(env.req, Request::Click { ref_id: 3, .. }));
+        assert!(env.launch.is_none());
+    }
+
+    #[test]
+    fn launch_config_from_request_overrides_daemon_start_flags() {
+        let cfg = DaemonConfig {
+            port: 9222,
+            headless: false,
+            attach_only: false,
+            home_dir: PathBuf::from("/tmp/surf"),
+        };
+        let mut state = SessionState::new(&cfg);
+        state.active_target_id = Some("t1".into());
+        state.last_snapshots.insert("t1".into(), "snap".into());
+
+        state.apply_launch(LaunchConfig {
+            port: 9222,
+            headless: true,
+            attach_only: true,
+        });
+        assert!(state.attach_only && state.headless);
+        assert_eq!(state.active_target_id.as_deref(), Some("t1"));
+
+        state.apply_launch(LaunchConfig {
+            port: 9333,
+            headless: true,
+            attach_only: true,
+        });
+        assert_eq!(state.port, 9333);
+        assert!(state.active_target_id.is_none() && state.last_snapshots.is_empty());
+    }
 
     #[test]
     fn fill_confirmation_echoes_dom_value() {

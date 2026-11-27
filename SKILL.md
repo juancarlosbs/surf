@@ -60,7 +60,7 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 ## Notes
 - Action diffs (`click`, `fill`, ...) cover interactive elements only; page text comes only from `surf open` / `surf snap`.
 - Inside `surf run`, only the last step (and explicit `snap` steps) take a snapshot. Refs from your last snapshot stay valid through the batch; use labels or a `snap` step when a step needs fresh refs.
-- `--attach`/`--headless` are fixed when the daemon starts; run `surf stop` after changing them.
+- `--attach`, `--headless` and `--port` apply to each command, even when the daemon is already running.
 
 ## Safety (logged-in sessions)
 `surf` drives the user's real, logged-in browser (X, GitHub, Gmail, ...).
