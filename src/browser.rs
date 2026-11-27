@@ -84,9 +84,12 @@ pub async fn http_request(port: u16, method: &str, path: &str) -> Result<(u16, S
     let mut stream = tokio::time::timeout(CDP_HTTP_CONNECT_TIMEOUT, TcpStream::connect(&addr))
         .await
         .map_err(|_| {
-            anyhow!(
-                "cdp_http_connect_timeout={}ms exceeded on {addr}",
-                CDP_HTTP_CONNECT_TIMEOUT.as_millis()
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "cdp_http_connect_timeout={}ms exceeded on {addr}",
+                    CDP_HTTP_CONNECT_TIMEOUT.as_millis()
+                ),
             )
         })?
         .with_context(|| format!("failed to connect to CDP at {addr}"))?;
@@ -262,12 +265,22 @@ fn percent_encode_url(input: &str) -> String {
     out
 }
 
-fn is_connection_refused(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
-    })
+fn io_error_kind(err: &anyhow::Error) -> Option<std::io::ErrorKind> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind)
+}
+
+fn probe_failure_blocks_launch(port: u16, err: anyhow::Error) -> Option<anyhow::Error> {
+    match io_error_kind(&err) {
+        Some(std::io::ErrorKind::ConnectionRefused) => None,
+        Some(std::io::ErrorKind::TimedOut) => Some(err.context(format!(
+            "127.0.0.1:{port} did not accept a connection (port filtered or browser hung); refusing to launch another browser"
+        ))),
+        _ => Some(err.context(format!(
+            "127.0.0.1:{port} accepts connections but is not a usable CDP endpoint; refusing to launch another browser on an occupied port"
+        ))),
+    }
 }
 
 pub struct LaunchPolicy<'a> {
@@ -279,12 +292,11 @@ pub struct LaunchPolicy<'a> {
 pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<BrowserVersion> {
     match get_version(port).await {
         Ok(ver) => return Ok(ver),
-        Err(e) if !is_connection_refused(&e) => {
-            return Err(e.context(format!(
-                "127.0.0.1:{port} accepts connections but is not a usable CDP endpoint; refusing to launch another browser on an occupied port"
-            )));
+        Err(e) => {
+            if let Some(blocked) = probe_failure_blocks_launch(port, e) {
+                return Err(blocked);
+            }
         }
-        Err(_) => {}
     }
 
     if policy.attach_only {
@@ -318,15 +330,18 @@ pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Brow
         .with_context(|| format!("failed to launch browser {}", bin.display()))?;
 
     let start = Instant::now();
+    let mut last_err = None;
     while start.elapsed() < BROWSER_BOOT_TIMEOUT {
-        if let Ok(ver) = get_version(port).await {
-            return Ok(ver);
+        match get_version(port).await {
+            Ok(ver) => return Ok(ver),
+            Err(e) => last_err = Some(e),
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    let last_err = last_err.map_or_else(|| "none".into(), |e| format!("{e:#}"));
     bail!(
-        "browser_boot_timeout={}ms exceeded waiting for CDP on 127.0.0.1:{port} (binary: {}). Set SURF_BROWSER=/path/to/browser to launch another binary, or start your browser with --remote-debugging-port={port} and pass --attach",
+        "browser_boot_timeout={}ms exceeded waiting for CDP on 127.0.0.1:{port} (binary: {}; last error: {last_err}). Set SURF_BROWSER=/path/to/browser to launch another binary, or start your browser with --remote-debugging-port={port} and pass --attach",
         BROWSER_BOOT_TIMEOUT.as_millis(),
         bin.display()
     )
@@ -335,6 +350,22 @@ pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Brow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_timeout_is_not_reported_as_occupied_port() {
+        let timeout = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "cdp_http_connect_timeout=2000ms exceeded",
+        ))
+        .context("failed to connect to CDP");
+        let msg = format!("{:#}", probe_failure_blocks_launch(9222, timeout).unwrap());
+        assert!(msg.contains("did not accept a connection"), "{msg}");
+        assert!(!msg.contains("accepts connections"), "{msg}");
+
+        let refused =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(probe_failure_blocks_launch(9222, refused).is_none());
+    }
 
     #[tokio::test]
     async fn attach_only_fails_fast_without_launching() {
