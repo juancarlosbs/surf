@@ -19,9 +19,9 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
    ```bash
    surf run 'fill @1 "my query"' 'click @2' 'wait idle' 'snap --diff'
    ```
-   Or skip the initial `surf snap` turn completely with semantic label commands (`click-label` / `fill-label`), which resolve visible elements directly in the daemon by `aria-label`, `placeholder`, `<label>`, or `innerText`:
+   Or skip the initial `surf snap` and `wait` turns completely with semantic label commands (`click-label` / `fill-label`), which auto-wait up to 5s and resolve visible elements directly in the daemon by `aria-label`, `placeholder`, `<label>`, or `innerText`:
    ```bash
-   surf run 'open https://example.com' 'wait idle' 'fill-label "Search" "rust cdp"' 'click-label "Submit"'
+   surf run 'open https://example.com' 'fill-label "Search" "rust cdp"' 'click-label "Submit"'
    ```
 
 3. **Navigate & filter large pages**:

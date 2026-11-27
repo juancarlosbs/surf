@@ -409,22 +409,43 @@ async fn focus_and_clear_ref(cdp: &CdpClient, ref_id: u32) -> Result<()> {
 async fn resolve_label_point(cdp: &CdpClient, label: &str) -> Result<(f64, f64)> {
     let args = json!({ "query": label, "mode": "click" });
     let expr = format!("({RESOLVE_LABEL_JS})({args})");
-    let val = cdp.eval_value(&expr).await?;
-    if val.get("found").and_then(|v| v.as_bool()) != Some(true) {
-        bail!("click-label: no visible element matching \"{label}\"");
+    let timeout_ms: u64 = 5_000;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+    loop {
+        let val = cdp.eval_value(&expr).await?;
+        if val.get("found").and_then(|v| v.as_bool()) == Some(true) {
+            let x = val.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = val.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            return Ok((x, y));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "click-label_timeout={timeout_ms}ms: no visible element matching \"{label}\" (run `surf snap` to inspect)"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
     }
-    let x = val.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let y = val.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    Ok((x, y))
 }
 
 async fn focus_and_clear_label(cdp: &CdpClient, label: &str) -> Result<()> {
     let args = json!({ "query": label, "mode": "fill" });
     let expr = format!("({RESOLVE_LABEL_JS})({args})");
-    let val = cdp.eval_value(&expr).await?;
-    if val.get("found").and_then(|v| v.as_bool()) != Some(true) {
-        bail!("fill-label: no visible editable element matching \"{label}\"");
-    }
+    let timeout_ms: u64 = 5_000;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+    let val = loop {
+        let val = cdp.eval_value(&expr).await?;
+        if val.get("found").and_then(|v| v.as_bool()) == Some(true) {
+            break val;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "fill-label_timeout={timeout_ms}ms: no visible editable element matching \"{label}\" (run `surf snap` to inspect)"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    };
 
     let is_content_editable = val
         .get("isContentEditable")
