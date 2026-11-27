@@ -126,6 +126,12 @@ pub enum WaitTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Phase {
+    pub name: String,
+    pub us: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,6 +140,8 @@ pub struct Response {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<Phase>,
 }
 
 impl Response {
@@ -143,6 +151,7 @@ impl Response {
             output: Some(output.into()),
             error: None,
             elapsed_ms: Some(elapsed_ms),
+            phases: Vec::new(),
         }
     }
 
@@ -152,6 +161,7 @@ impl Response {
             output: None,
             error: Some(error.into()),
             elapsed_ms: Some(elapsed_ms),
+            phases: Vec::new(),
         }
     }
 }

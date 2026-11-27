@@ -9,7 +9,7 @@
   const vh = window.innerHeight || document.documentElement.clientHeight;
   const filter = opts.filter ? opts.filter.toLowerCase() : null;
   const maxElements = opts.maxElements || 150;
-  const maxTextChars = opts.maxTextChars || 4000;
+  const maxTextChars = opts.maxTextChars ?? 4000;
 
   const clean = (s, maxLen = 80) => {
     if (!s) return "";
@@ -136,7 +136,7 @@
   if (document.body) walk(document.body);
   window.__surfRefs = refs;
 
-  let rawText = document.body ? (document.body.innerText || "") : "";
+  let rawText = maxTextChars > 0 && document.body ? (document.body.innerText || "") : "";
   rawText = rawText.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
   const totalTextChars = rawText.length;
   const textTruncated = totalTextChars > maxTextChars;

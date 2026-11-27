@@ -2,6 +2,7 @@ use crate::protocol::{
     Request, ScrollDirection, SnapOptions, WaitTarget, default_max_elements, default_max_text_chars,
 };
 use anyhow::{Result, anyhow, bail};
+use clap::builder::FalseyValueParser;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -16,10 +17,14 @@ pub struct Cli {
     pub port: u16,
 
     /// Launch browser in headless mode when auto-starting
-    #[arg(long, env = "SURF_HEADLESS", default_value_t = false, global = true)]
+    #[arg(long, env = "SURF_HEADLESS", value_parser = FalseyValueParser::new(), global = true)]
     pub headless: bool,
 
-    /// Print execution timing to stderr
+    /// Never launch a browser; fail fast if no CDP browser listens on --port (env: SURF_ATTACH_ONLY)
+    #[arg(long = "attach", env = "SURF_ATTACH_ONLY", value_parser = FalseyValueParser::new(), global = true)]
+    pub attach_only: bool,
+
+    /// Print total and per-phase/per-step timing to stderr
     #[arg(long, default_value_t = false, global = true)]
     pub timing: bool,
 
@@ -114,10 +119,7 @@ pub enum Command {
     /// List open tabs
     Tabs,
     /// Switch, open, or close a tab (`surf tab 0`, `surf tab new [url]`, `surf tab close [idx]`)
-    Tab {
-        action: String,
-        arg: Option<String>,
-    },
+    Tab { action: String, arg: Option<String> },
     /// Execute multiple actions in a single daemon roundtrip
     Run {
         /// Pass a JSON array of Request objects instead of terse step strings
@@ -174,10 +176,7 @@ pub fn command_to_request(cmd: Command) -> Result<Request> {
             ref_id: parse_ref(&ref_id)?,
             diff: !full,
         }),
-        Command::ClickLabel { label, full } => Ok(Request::ClickLabel {
-            label,
-            diff: !full,
-        }),
+        Command::ClickLabel { label, full } => Ok(Request::ClickLabel { label, diff: !full }),
         Command::Fill { ref_id, text, full } => Ok(Request::Fill {
             ref_id: parse_ref(&ref_id)?,
             text,
@@ -227,15 +226,18 @@ pub fn command_to_request(cmd: Command) -> Result<Request> {
             "new" => Ok(Request::TabNew { url: arg }),
             "close" => {
                 let idx = match arg {
-                    Some(s) => Some(s.parse::<usize>().map_err(|_| anyhow!("invalid tab index {s}"))?),
+                    Some(s) => Some(
+                        s.parse::<usize>()
+                            .map_err(|_| anyhow!("invalid tab index {s}"))?,
+                    ),
                     None => None,
                 };
                 Ok(Request::TabClose { index: idx })
             }
             num => {
-                let idx = num
-                    .parse::<usize>()
-                    .map_err(|_| anyhow!("invalid tab action \"{num}\" — use <index>, new, or close"))?;
+                let idx = num.parse::<usize>().map_err(|_| {
+                    anyhow!("invalid tab action \"{num}\" — use <index>, new, or close")
+                })?;
                 Ok(Request::TabSwitch { index: idx })
             }
         },
@@ -308,6 +310,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_attach_and_headless_flags() {
+        let cli = Cli::try_parse_from(["surf", "--attach", "--headless", "status"]).unwrap();
+        assert!(cli.attach_only && cli.headless);
+    }
+
+    #[test]
     fn parses_batch_steps_with_quotes() {
         let req = parse_batch_step(r#"fill @3 "hello world""#).unwrap();
         match req {
@@ -353,7 +361,8 @@ mod tests {
             _ => panic!("expected ClickLabel"),
         }
 
-        let fill_req = parse_batch_step(r#"fill-label "Post text" "hello from surf" --full"#).unwrap();
+        let fill_req =
+            parse_batch_step(r#"fill-label "Post text" "hello from surf" --full"#).unwrap();
         match fill_req {
             Request::FillLabel { label, text, diff } => {
                 assert_eq!(label, "Post text");

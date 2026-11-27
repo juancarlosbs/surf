@@ -40,13 +40,17 @@ pub fn build_snapshot_expr(opts: &SnapOptions) -> String {
     format!("({SNAPSHOT_JS})({args})")
 }
 
-pub fn format_snapshot(val: Value, opts: &SnapOptions) -> Result<String> {
-    let snap: RawSnapshot =
-        serde_json::from_value(val).context("failed to decode snapshot payload")?;
-    Ok(render_snapshot(&snap, opts))
+pub fn parse_snapshot(val: Value) -> Result<RawSnapshot> {
+    serde_json::from_value(val).context("failed to decode snapshot payload")
 }
 
 pub fn render_snapshot(snap: &RawSnapshot, opts: &SnapOptions) -> String {
+    let mut out = render_interactive(snap);
+    append_text(&mut out, snap, opts);
+    out
+}
+
+pub fn render_interactive(snap: &RawSnapshot) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str(&format!("url: {}\n", snap.url));
     if !snap.title.is_empty() {
@@ -85,6 +89,10 @@ pub fn render_snapshot(snap: &RawSnapshot, opts: &SnapOptions) -> String {
         ));
     }
 
+    out
+}
+
+fn append_text(out: &mut String, snap: &RawSnapshot, opts: &SnapOptions) {
     if !snap.text.is_empty() && opts.filter.is_none() {
         out.push_str("---\n");
         out.push_str(&snap.text);
@@ -98,8 +106,6 @@ pub fn render_snapshot(snap: &RawSnapshot, opts: &SnapOptions) -> String {
             ));
         }
     }
-
-    out
 }
 
 pub fn diff_snapshots(prev: &str, curr: &str) -> String {
@@ -195,6 +201,10 @@ mod tests {
         assert!(rendered.contains("@2 [btn] \"Sign in\""));
         assert!(rendered.contains("showing 2/5 interactive elements"));
         assert!(rendered.contains("showing 7/100 text chars"));
+
+        let interactive = render_interactive(&snap);
+        assert!(interactive.contains("@2 [btn] \"Sign in\""));
+        assert!(!interactive.contains("Welcome"));
     }
 
     #[test]

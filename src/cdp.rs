@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
@@ -15,7 +15,7 @@ pub struct CdpClient {
     pending: PendingMap,
     next_id: AtomicU64,
     timeout: Duration,
-    ws_url: String,
+    alive: Arc<AtomicBool>,
 }
 
 impl CdpClient {
@@ -36,16 +36,20 @@ impl CdpClient {
         let (mut sink, mut stream) = ws_stream.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
 
+        let alive_writer = Arc::clone(&alive);
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if sink.send(Message::Text(msg.into())).await.is_err() {
                     break;
                 }
             }
+            alive_writer.store(false, Ordering::Relaxed);
         });
 
         let pending_reader = Arc::clone(&pending);
+        let alive_reader = Arc::clone(&alive);
         tokio::spawn(async move {
             while let Some(item) = stream.next().await {
                 let Ok(msg) = item else {
@@ -59,13 +63,17 @@ impl CdpClient {
                                 if let Some(err) = val.get("error") {
                                     let _ = tx.send(Err(anyhow!("CDP error: {err}")));
                                 } else {
-                                    let _ = tx.send(Ok(val.get("result").cloned().unwrap_or(Value::Null)));
+                                    let _ = tx.send(Ok(val
+                                        .get("result")
+                                        .cloned()
+                                        .unwrap_or(Value::Null)));
                                 }
                             }
                         }
                     }
                 }
             }
+            alive_reader.store(false, Ordering::Relaxed);
             let mut map = pending_reader.lock().await;
             for (_, waiter) in map.drain() {
                 let _ = waiter.send(Err(anyhow!("CDP WebSocket closed")));
@@ -77,12 +85,12 @@ impl CdpClient {
             pending,
             next_id: AtomicU64::new(1),
             timeout: Duration::from_millis(timeout_ms),
-            ws_url: ws_url.to_string(),
+            alive,
         })
     }
 
-    pub fn ws_url(&self) -> &str {
-        &self.ws_url
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
@@ -135,10 +143,7 @@ impl CdpClient {
             bail!("JS error: {desc}");
         }
 
-        Ok(res
-            .pointer("/result/value")
-            .cloned()
-            .unwrap_or(Value::Null))
+        Ok(res.pointer("/result/value").cloned().unwrap_or(Value::Null))
     }
 
     pub async fn navigate(&self, url: &str) -> Result<()> {
@@ -237,10 +242,7 @@ impl CdpClient {
 
     pub async fn screenshot_png_base64(&self) -> Result<String> {
         let res = self
-            .call(
-                "Page.captureScreenshot",
-                json!({ "format": "png" }),
-            )
+            .call("Page.captureScreenshot", json!({ "format": "png" }))
             .await?;
         res.get("data")
             .and_then(|v| v.as_str())

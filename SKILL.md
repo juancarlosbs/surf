@@ -43,10 +43,10 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 |---|---|
 | `surf open <url>` | Navigate + wait ready + compact snapshot |
 | `surf snap [--diff] [--all] [--filter q]` | Compact interactive snapshot |
-| `surf click @N` | Click element + return diff |
+| `surf click @N` | Click element + return diff of interactive elements |
 | `surf click-label "<text>"` | Click visible element by aria-label, placeholder, label, or innerText + return diff |
-| `surf fill @N "text"` | Focus, clear, type + return diff |
-| `surf fill-label "<label>" "<value>"` | Focus, clear, type into visible input by label/placeholder/aria-label + return diff |
+| `surf fill @N "text"` | Focus, clear, type + `filled @N val="..."` (real DOM value) + diff |
+| `surf fill-label "<label>" "<value>"` | Same as `fill`, matched by label/placeholder/aria-label |
 | `surf key Enter\|Escape\|Tab` | Send key press |
 | `surf scroll up\|down\|top\|bottom [px]` | Scroll viewport |
 | `surf wait <ms>\|idle\|text:<str>` | Wait for time, DOM settle, or text |
@@ -54,6 +54,19 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 | `surf eval "<js>"` | Evaluate JS expression |
 | `surf tabs` / `surf tab <idx\|new\|close>` | Manage browser tabs |
 | `surf status` / `surf stop` | Daemon status / shutdown |
+| `surf --attach ...` (`SURF_ATTACH_ONLY=1`) | Never launch a browser; fail fast if none listens on the CDP port |
+| `surf --timing ...` | Print total + per-step/per-phase timing to stderr |
+
+## Notes
+- Action diffs (`click`, `fill`, ...) cover interactive elements only; page text comes only from `surf open` / `surf snap`.
+- Inside `surf run`, only the last step (and explicit `snap` steps) take a snapshot. Refs from your last snapshot stay valid through the batch; use labels or a `snap` step when a step needs fresh refs.
+- `--attach`/`--headless` are fixed when the daemon starts; run `surf stop` after changing them.
+
+## Safety (logged-in sessions)
+`surf` drives the user's real, logged-in browser (X, GitHub, Gmail, ...).
+- Never click Post, Send, Create, Delete, Submit, or any public/irreversible action without explicit user confirmation. Draft requests stop at the filled field.
+- Prefer `surf eval` for cheap field/state verification instead of extra snapshots or screenshots.
+- Measure with `surf --timing` before claiming a speedup.
 
 ## Rules
 - Never take a screenshot unless visual layout/CSS debugging is explicitly needed.

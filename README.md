@@ -34,12 +34,13 @@ Start Chrome with remote debugging enabled (or point `SURF_PORT` to an existing 
   --user-data-dir="$HOME/.surf/profile"
 ```
 
-`surf` automatically attaches to any CDP listener on `SURF_PORT` (default `9222`) without spawning a second browser.
+`surf` automatically attaches to any CDP listener on `SURF_PORT` (default `9222`) without spawning a second browser. Pass `--attach` (or `SURF_ATTACH_ONLY=1`) to never launch one: surf fails fast with `no CDP browser listening on 127.0.0.1:<port>` instead. If the port accepts connections but is not a CDP endpoint, surf fails with the original error rather than launching a browser that cannot bind it.
 
 ## Environment Variables
 
 - `SURF_PORT` — CDP port (default: `9222`)
-- `SURF_HEADLESS` — launch headless when auto-starting (`true`/`false`)
+- `SURF_HEADLESS` — launch headless when auto-starting (`1`/`0`, `true`/`false`)
+- `SURF_ATTACH_ONLY` — never launch a browser, only attach (`1`/`0`)
 - `SURF_BROWSER` — custom Chromium binary path
 - `SURF_HOME` — daemon socket, PID, and persistent profile directory (default: `~/.surf`)
 - `SURF_TIMEOUT_MS` — per-CDP-call timeout in ms (default: `15000`)
