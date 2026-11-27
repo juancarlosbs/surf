@@ -53,8 +53,19 @@ pub enum Request {
         #[serde(default = "default_true")]
         diff: bool,
     },
+    ClickLabel {
+        label: String,
+        #[serde(default = "default_true")]
+        diff: bool,
+    },
     Fill {
         ref_id: u32,
+        text: String,
+        #[serde(default = "default_true")]
+        diff: bool,
+    },
+    FillLabel {
+        label: String,
         text: String,
         #[serde(default = "default_true")]
         diff: bool,

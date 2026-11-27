@@ -12,6 +12,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+const RESOLVE_LABEL_JS: &str = include_str!("js/resolve_label.js");
+
 pub struct DaemonConfig {
     pub port: u16,
     pub headless: bool,
@@ -166,10 +168,39 @@ impl SessionState {
                 };
                 self.take_snap(&opts).await
             }
+            Request::ClickLabel { label, diff } => {
+                let (x, y) = {
+                    let cdp = self.ensure_cdp().await?;
+                    resolve_label_point(cdp, &label).await?
+                };
+                {
+                    let cdp = self.ensure_cdp().await?;
+                    cdp.click_point(x, y).await?;
+                }
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                let opts = SnapOptions {
+                    diff,
+                    ..Default::default()
+                };
+                self.take_snap(&opts).await
+            }
             Request::Fill { ref_id, text, diff } => {
                 {
                     let cdp = self.ensure_cdp().await?;
                     focus_and_clear_ref(cdp, ref_id).await?;
+                    cdp.insert_text(&text).await?;
+                }
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                let opts = SnapOptions {
+                    diff,
+                    ..Default::default()
+                };
+                self.take_snap(&opts).await
+            }
+            Request::FillLabel { label, text, diff } => {
+                {
+                    let cdp = self.ensure_cdp().await?;
+                    focus_and_clear_label(cdp, &label).await?;
                     cdp.insert_text(&text).await?;
                 }
                 tokio::time::sleep(Duration::from_millis(80)).await;
@@ -370,6 +401,59 @@ async fn focus_and_clear_ref(cdp: &CdpClient, ref_id: u32) -> Result<()> {
         bail!("ref @{ref_id} not found or detached; run `surf snap` to refresh refs");
     }
     if val.get("hasContent").and_then(|v| v.as_bool()) == Some(true) {
+        cdp.dispatch_key("Backspace").await?;
+    }
+    Ok(())
+}
+
+async fn resolve_label_point(cdp: &CdpClient, label: &str) -> Result<(f64, f64)> {
+    let args = json!({ "query": label, "mode": "click" });
+    let expr = format!("({RESOLVE_LABEL_JS})({args})");
+    let val = cdp.eval_value(&expr).await?;
+    if val.get("found").and_then(|v| v.as_bool()) != Some(true) {
+        bail!("click-label: no visible element matching \"{label}\"");
+    }
+    let x = val.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let y = val.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    Ok((x, y))
+}
+
+async fn focus_and_clear_label(cdp: &CdpClient, label: &str) -> Result<()> {
+    let args = json!({ "query": label, "mode": "fill" });
+    let expr = format!("({RESOLVE_LABEL_JS})({args})");
+    let val = cdp.eval_value(&expr).await?;
+    if val.get("found").and_then(|v| v.as_bool()) != Some(true) {
+        bail!("fill-label: no visible editable element matching \"{label}\"");
+    }
+
+    let is_content_editable = val
+        .get("isContentEditable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_content = val
+        .get("hasContent")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if is_content_editable {
+        let x = val.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let y = val.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        cdp.click_point(x, y).await?;
+        if has_content {
+            let select_expr = "(() => {
+                const el = window.__surfActiveEditable;
+                if (!el || !el.isConnected) return false;
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                return true;
+            })()";
+            let _ = cdp.eval_value(select_expr).await?;
+            cdp.dispatch_key("Backspace").await?;
+        }
+    } else if has_content {
         cdp.dispatch_key("Backspace").await?;
     }
     Ok(())

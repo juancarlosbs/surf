@@ -69,9 +69,24 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         full: bool,
     },
+    /// Click a visible element matched by label/text (aria-label, placeholder, label, innerText)
+    #[command(name = "click-label")]
+    ClickLabel {
+        label: String,
+        #[arg(long, default_value_t = false)]
+        full: bool,
+    },
     /// Focus, clear, and type into an input by @ref
     Fill {
         ref_id: String,
+        text: String,
+        #[arg(long, default_value_t = false)]
+        full: bool,
+    },
+    /// Focus, clear, and type into a visible input matched by label/placeholder/aria-label
+    #[command(name = "fill-label")]
+    FillLabel {
+        label: String,
         text: String,
         #[arg(long, default_value_t = false)]
         full: bool,
@@ -159,8 +174,17 @@ pub fn command_to_request(cmd: Command) -> Result<Request> {
             ref_id: parse_ref(&ref_id)?,
             diff: !full,
         }),
+        Command::ClickLabel { label, full } => Ok(Request::ClickLabel {
+            label,
+            diff: !full,
+        }),
         Command::Fill { ref_id, text, full } => Ok(Request::Fill {
             ref_id: parse_ref(&ref_id)?,
+            text,
+            diff: !full,
+        }),
+        Command::FillLabel { label, text, full } => Ok(Request::FillLabel {
+            label,
             text,
             diff: !full,
         }),
@@ -316,5 +340,27 @@ mod tests {
                 target: WaitTarget::Text { ref text, .. }
             } if text == "Dashboard"
         ));
+    }
+
+    #[test]
+    fn parses_semantic_label_batch_steps() {
+        let click_req = parse_batch_step(r#"click-label "Sign in""#).unwrap();
+        match click_req {
+            Request::ClickLabel { label, diff } => {
+                assert_eq!(label, "Sign in");
+                assert!(diff);
+            }
+            _ => panic!("expected ClickLabel"),
+        }
+
+        let fill_req = parse_batch_step(r#"fill-label "Post text" "hello from surf" --full"#).unwrap();
+        match fill_req {
+            Request::FillLabel { label, text, diff } => {
+                assert_eq!(label, "Post text");
+                assert_eq!(text, "hello from surf");
+                assert!(!diff);
+            }
+            _ => panic!("expected FillLabel"),
+        }
     }
 }

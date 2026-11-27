@@ -19,6 +19,10 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
    ```bash
    surf run 'fill @1 "my query"' 'click @2' 'wait idle' 'snap --diff'
    ```
+   Or skip the initial `surf snap` turn completely with semantic label commands (`click-label` / `fill-label`), which resolve visible elements directly in the daemon by `aria-label`, `placeholder`, `<label>`, or `innerText`:
+   ```bash
+   surf run 'open https://example.com' 'wait idle' 'fill-label "Search" "rust cdp"' 'click-label "Submit"'
+   ```
 
 3. **Navigate & filter large pages**:
    ```bash
@@ -40,7 +44,9 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 | `surf open <url>` | Navigate + wait ready + compact snapshot |
 | `surf snap [--diff] [--all] [--filter q]` | Compact interactive snapshot |
 | `surf click @N` | Click element + return diff |
+| `surf click-label "<text>"` | Click visible element by aria-label, placeholder, label, or innerText + return diff |
 | `surf fill @N "text"` | Focus, clear, type + return diff |
+| `surf fill-label "<label>" "<value>"` | Focus, clear, type into visible input by label/placeholder/aria-label + return diff |
 | `surf key Enter\|Escape\|Tab` | Send key press |
 | `surf scroll up\|down\|top\|bottom [px]` | Scroll viewport |
 | `surf wait <ms>\|idle\|text:<str>` | Wait for time, DOM settle, or text |
@@ -51,5 +57,6 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 
 ## Rules
 - Never take a screenshot unless visual layout/CSS debugging is explicitly needed.
-- Always batch multi-step interactions (`fill` + `click` + `wait`) with `surf run`.
+- Always batch multi-step interactions (`open` + `wait` + `fill-label` / `click-label` or `fill` + `click`) with `surf run`.
+- Prefer `click-label` / `fill-label` when labels are known to avoid an extra `surf snap` turn.
 - If a ref fails (`not found or detached`), run `surf snap` to refresh refs.
