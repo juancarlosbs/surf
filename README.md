@@ -12,11 +12,17 @@ Fast, ultra-low-token browser automation daemon & CLI for AI agents (Claude Code
 | 1 LLM turn per click/type | `surf run` executes multi-step batches in 1 turn |
 | Cold browser boot / MCP prompt bloat | Warm Unix-socket daemon + zero-overhead CLI + 40-line `SKILL.md` |
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juancarlosbs/surf/main/scripts/install.sh | sh
+```
+
+Prebuilt for macOS (arm64, x64) and Linux (x64, arm64; static musl). Installs to `~/.local/bin` (`SURF_INSTALL_DIR` to change, `SURF_VERSION=v0.1.0` to pin). From source: `cargo install --git https://github.com/juancarlosbs/surf`.
+
 ## Quick Start
 
 ```bash
-cargo install --path .
-
 # Auto-starts daemon + persistent Chrome profile (~/.surf/profile)
 surf open https://news.ycombinator.com
 
