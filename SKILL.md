@@ -54,6 +54,7 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 | `surf eval "<js>"` | Evaluate JS expression |
 | `surf tabs` / `surf tab <idx\|new\|close>` | Manage browser tabs |
 | `surf status` / `surf stop` | Daemon status / shutdown |
+| `surf login [url]` | Open a window on the surf profile so the user can sign in once (ask the user to do it) |
 | `surf --attach ...` (`SURF_ATTACH_ONLY=1`) | Never launch a browser; fail fast if none listens on the CDP port |
 | `surf --timing ...` | Print total + per-step/per-phase timing to stderr |
 

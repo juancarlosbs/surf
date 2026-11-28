@@ -41,6 +41,8 @@ pub enum Command {
     },
     /// Show daemon & browser status
     Status,
+    /// Open a browser window (never headless) on the surf profile to sign in once; later runs reuse the session
+    Login { url: Option<String> },
     /// Stop the background daemon
     Stop,
     /// Navigate to a URL and return a compact snapshot
@@ -140,6 +142,7 @@ pub fn parse_ref(raw: &str) -> Result<u32> {
 pub fn command_to_request(cmd: Command) -> Result<Request> {
     match cmd {
         Command::Status => Ok(Request::Status),
+        Command::Login { url } => Ok(Request::Login { url }),
         Command::Stop => Ok(Request::Stop),
         Command::Open {
             url,
