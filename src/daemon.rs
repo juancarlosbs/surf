@@ -88,6 +88,7 @@ struct SessionState {
     headless: bool,
     attach_only: bool,
     profile_dir: PathBuf,
+    browser_log: PathBuf,
     active_target_id: Option<String>,
     cdp: Option<CdpClient>,
     last_snapshots: HashMap<String, String>,
@@ -116,6 +117,7 @@ impl SessionState {
             headless: cfg.headless,
             attach_only: cfg.attach_only,
             profile_dir: cfg.profile_dir(),
+            browser_log: cfg.home_dir.join("browser.log"),
             active_target_id: None,
             cdp: None,
             last_snapshots: HashMap::new(),
@@ -142,6 +144,7 @@ impl SessionState {
             headless: self.headless,
             attach_only: self.attach_only,
             profile_dir: &self.profile_dir,
+            log_path: &self.browser_log,
         }
     }
 

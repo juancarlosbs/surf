@@ -70,7 +70,7 @@ surf tabs
 - `SURF_HEADLESS` — launch headless when auto-starting (`1`/`0`, `true`/`false`)
 - `SURF_ATTACH_ONLY` — never launch a browser, only attach (`1`/`0`)
 - `SURF_BROWSER` — custom Chromium binary path
-- `SURF_HOME` — daemon socket, PID, and persistent profile directory (default: `~/.surf`)
+- `SURF_HOME` — daemon socket, PID, logs (`daemon.log`, `browser.log`) and persistent profile directory (default: `~/.surf`)
 - `SURF_TIMEOUT_MS` — per-CDP-call timeout in ms (default: `15000`)
 
 ## Development

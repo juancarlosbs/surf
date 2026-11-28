@@ -289,6 +289,18 @@ pub struct LaunchPolicy<'a> {
     pub headless: bool,
     pub attach_only: bool,
     pub profile_dir: &'a Path,
+    pub log_path: &'a Path,
+}
+
+pub fn log_tail(label: &str, path: &Path) -> String {
+    const TAIL_BYTES: usize = 2000;
+    let log = std::fs::read_to_string(path).unwrap_or_default();
+    let log = log.trim();
+    if log.is_empty() {
+        return format!("{label} log {} is empty", path.display());
+    }
+    let start = log.floor_char_boundary(log.len().saturating_sub(TAIL_BYTES));
+    format!("{label} log {}:\n{}", path.display(), &log[start..])
 }
 
 pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<BrowserVersion> {
@@ -312,6 +324,9 @@ pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Brow
     std::fs::create_dir_all(profile_dir)
         .with_context(|| format!("failed to create profile dir {}", profile_dir.display()))?;
 
+    let log = std::fs::File::create(policy.log_path)
+        .with_context(|| format!("failed to create browser log {}", policy.log_path.display()))?;
+
     let mut cmd = Command::new(&bin);
     cmd.arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={}", profile_dir.display()))
@@ -322,13 +337,14 @@ pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Brow
         .arg("about:blank")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(log);
 
     if policy.headless {
         cmd.arg("--headless=new");
     }
 
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("failed to launch browser {}", bin.display()))?;
 
     let start = Instant::now();
@@ -337,6 +353,13 @@ pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Brow
         match get_version(port).await {
             Ok(ver) => return Ok(ver),
             Err(e) => last_err = Some(e),
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            bail!(
+                "browser exited ({status}) before CDP came up on 127.0.0.1:{port} (binary: {}). If that browser is already running with this profile, the launch may have been handed to it. {}",
+                bin.display(),
+                log_tail("browser", policy.log_path)
+            );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -379,6 +402,7 @@ mod tests {
             headless: true,
             attach_only: true,
             profile_dir: &dir,
+            log_path: &dir.join("surf-test-browser.log"),
         };
         let err = ensure_browser(port, &policy).await.unwrap_err().to_string();
         assert!(
@@ -403,6 +427,7 @@ mod tests {
             headless: true,
             attach_only: false,
             profile_dir: &dir,
+            log_path: &dir.join("surf-test-browser.log"),
         };
         let err = format!("{:#}", ensure_browser(port, &policy).await.unwrap_err());
         assert!(err.contains("refusing to launch another browser"), "{err}");
