@@ -33,6 +33,10 @@ const POST_FILL_SETTLE: Duration = Duration::from_millis(80);
 // Tripwire for elements rendered after async work; anything slower belongs to `surf wait`.
 const LABEL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const LABEL_POLL_INTERVAL: Duration = Duration::from_millis(80);
+// Receipt (2026-11-28, headless Chrome, 18 loads of reddit/github/youtube/stackoverflow/vercel/airbnb
+// right after `open`): gaps between mutation bursts while loading reached 298ms; the next cluster
+// (lazy loads, tickers) started at 776ms. Static pages mutate 0 times and pay the full window.
+const IDLE_QUIET_WINDOW: Duration = Duration::from_millis(350);
 const WAIT_TEXT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FILL_ECHO_MAX_CHARS: usize = 200;
 // sockaddr_un.sun_path is 104 bytes on macOS/BSD and 108 on Linux, including the trailing NUL.
@@ -349,11 +353,12 @@ impl SessionState {
                 }
                 WaitTarget::Idle { timeout_ms } => {
                     let cdp = self.ensure_cdp().await?;
+                    let quiet_ms = IDLE_QUIET_WINDOW.as_millis();
                     let expr = format!(
                         "new Promise((resolve) => {{
                             let timer = null;
                             const done = (r) => {{ obs.disconnect(); clearTimeout(maxT); clearTimeout(timer); resolve(r); }};
-                            const bump = () => {{ clearTimeout(timer); timer = setTimeout(() => done('idle'), 250); }};
+                            const bump = () => {{ clearTimeout(timer); timer = setTimeout(() => done('idle'), {quiet_ms}); }};
                             const obs = new MutationObserver(bump);
                             if (document.body) obs.observe(document.body, {{ childList: true, subtree: true, attributes: true }});
                             const maxT = setTimeout(() => done('timeout'), {timeout_ms});
@@ -377,6 +382,24 @@ impl SessionState {
                         tokio::time::sleep(WAIT_TEXT_POLL_INTERVAL).await;
                     }
                     bail!("wait_text_timeout={timeout_ms}ms exceeded waiting for \"{text}\"")
+                }
+                WaitTarget::Label { label, timeout_ms } => {
+                    let args = json!({ "query": label, "mode": "probe" });
+                    let expr = format!("({RESOLVE_LABEL_JS})({args})");
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+                    loop {
+                        let cdp = self.ensure_cdp().await?;
+                        let val = cdp.eval_value(&expr).await?;
+                        if val.get("found").and_then(Value::as_bool) == Some(true) {
+                            return Ok(format!("found label: {}\n", json!(label)));
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            bail!(
+                                "wait_label_timeout={timeout_ms}ms: no visible element matching \"{label}\" (run `surf snap` to inspect)"
+                            );
+                        }
+                        tokio::time::sleep(LABEL_POLL_INTERVAL).await;
+                    }
                 }
             },
             Request::Eval { expr } => {

@@ -108,7 +108,7 @@ pub enum Command {
         #[arg(default_value_t = 600)]
         amount: i32,
     },
-    /// Wait for ms (`500`), DOM `idle`, or `text:Loaded`
+    /// Wait for ms (`500`), DOM `idle`, `text:Loaded`, or a visible element `label:Submit`
     Wait {
         target: String,
         #[arg(long, default_value_t = 5000)]
@@ -215,10 +215,17 @@ pub fn command_to_request(cmd: Command) -> Result<Request> {
                     text: text.to_string(),
                     timeout_ms: timeout,
                 }
+            } else if let Some(label) = target.strip_prefix("label:") {
+                WaitTarget::Label {
+                    label: label.to_string(),
+                    timeout_ms: timeout,
+                }
             } else if let Ok(ms) = target.parse::<u64>() {
                 WaitTarget::Ms { ms }
             } else {
-                bail!("invalid wait target \"{target}\" — use <ms>, idle, or text:<string>");
+                bail!(
+                    "invalid wait target \"{target}\" — use <ms>, idle, text:<string>, or label:<text>"
+                );
             };
             Ok(Request::Wait { target: wt })
         }
@@ -350,6 +357,12 @@ mod tests {
             Request::Wait {
                 target: WaitTarget::Text { ref text, .. }
             } if text == "Dashboard"
+        ));
+        assert!(matches!(
+            parse_batch_step(r#"wait "label:Sign in" --timeout 900"#).unwrap(),
+            Request::Wait {
+                target: WaitTarget::Label { ref label, timeout_ms: 900 }
+            } if label == "Sign in"
         ));
     }
 

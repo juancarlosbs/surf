@@ -167,6 +167,7 @@
 
   if (document.body) walk(document.body);
   if (!bestEl) return { found: false };
+  if (mode === "probe") return { found: true };
 
   bestEl.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   const r = bestEl.getBoundingClientRect();
