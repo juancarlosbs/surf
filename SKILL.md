@@ -49,7 +49,7 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 | `surf fill-label "<label>" "<value>"` | Same as `fill`, matched by label/placeholder/aria-label |
 | `surf key Enter\|Escape\|Tab` | Send key press |
 | `surf scroll up\|down\|top\|bottom [px]` | Scroll viewport |
-| `surf wait <ms>\|idle\|text:<str>` | Wait for time, DOM settle, or text |
+| `surf wait <ms>\|idle\|text:<str>\|label:<text>` | Wait for time, DOM settle (350ms quiet), text, or a visible element |
 | `surf run "<step1>" "<step2>" ...` | Execute batch in 1 roundtrip |
 | `surf eval "<js>"` | Evaluate JS expression |
 | `surf tabs` / `surf tab <idx\|new\|close>` | Manage browser tabs |
@@ -74,4 +74,5 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 - Never take a screenshot unless visual layout/CSS debugging is explicitly needed.
 - Always batch multi-step interactions (`open` + `wait` + `fill-label` / `click-label` or `fill` + `click`) with `surf run`.
 - Prefer `click-label` / `fill-label` when labels are known to avoid an extra `surf snap` turn.
+- Prefer `wait label:"..."` or `wait text:...` over `wait idle`: they return as soon as the thing appears; `idle` always costs at least 350ms.
 - If a ref fails (`not found or detached`), run `surf snap` to refresh refs.

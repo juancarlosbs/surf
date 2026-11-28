@@ -126,6 +126,7 @@ pub enum WaitTarget {
     Ms { ms: u64 },
     Idle { timeout_ms: u64 },
     Text { text: String, timeout_ms: u64 },
+    Label { label: String, timeout_ms: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

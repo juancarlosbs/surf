@@ -83,6 +83,15 @@ out=$(run run "open $fixtures/next.html" "click-label Next")
 check "batch with navigation returns full snapshot" "$out" "title: page two"
 check "batch with navigation is not a diff" "$out" "- @" absent
 
+out=$(run wait "label:Done")
+check "wait label" "$out" 'found label: "Done"'
+
+out=$(run wait "label:Nope" --timeout 300)
+check "wait label timeout names budget" "$out" "wait_label_timeout=300ms"
+
+out=$(run --timing wait idle)
+check "wait idle" "$out" "wait: idle"
+
 out=$(run wait "text:Done")
 check "wait text" "$out" "found text: Done"
 
