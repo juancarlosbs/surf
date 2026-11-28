@@ -34,16 +34,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run the background daemon
-    Daemon {
-        #[arg(long, default_value_t = false)]
-        foreground: bool,
-    },
-    /// Show daemon & browser status
+    /// Show browser and session status
     Status,
     /// Open a browser window (never headless) on the surf profile to sign in once; later runs reuse the session
     Login { url: Option<String> },
-    /// Stop the background daemon
+    /// Close the browser surf launched (never one it only attached to)
     Stop,
     /// Navigate to a URL and return a compact snapshot
     Open {
@@ -122,7 +117,7 @@ pub enum Command {
     Tabs,
     /// Switch, open, or close a tab (`surf tab 0`, `surf tab new [url]`, `surf tab close [idx]`)
     Tab { action: String, arg: Option<String> },
-    /// Execute multiple actions in a single daemon roundtrip
+    /// Execute multiple actions in one command
     Run {
         /// Pass a JSON array of Request objects instead of terse step strings
         #[arg(long)]
@@ -266,7 +261,6 @@ pub fn command_to_request(cmd: Command) -> Result<Request> {
             }
             Ok(Request::Batch { steps: reqs })
         }
-        Command::Daemon { .. } => bail!("daemon command handled directly"),
     }
 }
 

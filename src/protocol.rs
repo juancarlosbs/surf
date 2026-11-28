@@ -129,58 +129,8 @@ pub enum WaitTarget {
     Label { label: String, timeout_ms: u64 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaunchConfig {
-    pub port: u16,
-    pub headless: bool,
-    pub attach_only: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Envelope {
-    #[serde(flatten)]
-    pub req: Request,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub launch: Option<LaunchConfig>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Phase {
     pub name: String,
     pub us: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Response {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub phases: Vec<Phase>,
-}
-
-impl Response {
-    pub fn ok(output: impl Into<String>, elapsed_ms: u64) -> Self {
-        Self {
-            ok: true,
-            output: Some(output.into()),
-            error: None,
-            elapsed_ms: Some(elapsed_ms),
-            phases: Vec::new(),
-        }
-    }
-
-    pub fn err(error: impl Into<String>, elapsed_ms: u64) -> Self {
-        Self {
-            ok: false,
-            output: None,
-            error: Some(error.into()),
-            elapsed_ms: Some(elapsed_ms),
-            phases: Vec::new(),
-        }
-    }
 }

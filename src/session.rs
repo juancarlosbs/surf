@@ -1,20 +1,15 @@
 use crate::browser::{self, LaunchPolicy};
 use crate::cdp::CdpClient;
-use crate::protocol::{
-    Envelope, LaunchConfig, Phase, Request, Response, ScrollDirection, SnapOptions, WaitTarget,
-};
+use crate::protocol::{Phase, Request, ScrollDirection, SnapOptions, WaitTarget};
 use crate::snapshot::{
     build_snapshot_expr, diff_snapshots, parse_snapshot, render_interactive, render_snapshot,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
 
 const RESOLVE_LABEL_JS: &str = include_str!("js/resolve_label.js");
 const FOCUSED_VALUE_JS: &str = "(() => {
@@ -39,52 +34,79 @@ const LABEL_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const IDLE_QUIET_WINDOW: Duration = Duration::from_millis(350);
 const WAIT_TEXT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FILL_ECHO_MAX_CHARS: usize = 200;
-// sockaddr_un.sun_path is 104 bytes on macOS/BSD and 108 on Linux, including the trailing NUL.
-const MAX_UNIX_SOCKET_PATH_BYTES: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
 
-pub struct DaemonConfig {
+pub struct Config {
     pub port: u16,
     pub headless: bool,
     pub attach_only: bool,
     pub home_dir: PathBuf,
 }
 
-impl DaemonConfig {
-    pub fn socket_path(&self) -> PathBuf {
-        self.home_dir.join("daemon.sock")
+impl Config {
+    fn state_path(&self) -> PathBuf {
+        self.home_dir.join("state.json")
     }
 
-    pub fn log_path(&self) -> PathBuf {
-        self.home_dir.join("daemon.log")
+    fn lock_path(&self) -> PathBuf {
+        self.home_dir.join("state.lock")
     }
 
-    pub fn check_socket_path(&self) -> Result<()> {
-        let sock_path = self.socket_path();
-        let len = sock_path.as_os_str().len();
-        if len > MAX_UNIX_SOCKET_PATH_BYTES {
-            bail!(
-                "socket_path_len={len} exceeds unix limit {MAX_UNIX_SOCKET_PATH_BYTES} bytes ({}); set a shorter SURF_HOME",
-                sock_path.display()
-            );
-        }
-        Ok(())
-    }
-
-    pub fn launch(&self) -> LaunchConfig {
-        LaunchConfig {
-            port: self.port,
-            headless: self.headless,
-            attach_only: self.attach_only,
-        }
-    }
-
-    pub fn pid_path(&self) -> PathBuf {
-        self.home_dir.join("daemon.pid")
-    }
-
-    pub fn profile_dir(&self) -> PathBuf {
+    fn profile_dir(&self) -> PathBuf {
         self.home_dir.join("profile")
     }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedState {
+    port: u16,
+    active_target_id: Option<String>,
+    browser_pid: Option<u32>,
+    last_snapshots: HashMap<String, String>,
+}
+
+pub struct Outcome {
+    pub result: Result<String>,
+    pub elapsed_ms: u64,
+    pub phases: Vec<Phase>,
+}
+
+/// Runs one request in this process. The state file lock serializes concurrent surf commands.
+pub async fn run(cfg: &Config, req: Request) -> Result<Outcome> {
+    let start = Instant::now();
+    std::fs::create_dir_all(&cfg.home_dir)
+        .with_context(|| format!("failed to create {}", cfg.home_dir.display()))?;
+    let lock = std::fs::File::create(cfg.lock_path())
+        .with_context(|| format!("failed to open {}", cfg.lock_path().display()))?;
+    lock.lock()
+        .with_context(|| format!("failed to lock {}", cfg.lock_path().display()))?;
+
+    let mut state = SessionState::new(cfg);
+    let saved = std::fs::read(cfg.state_path())
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<PersistedState>(&raw).ok())
+        .filter(|saved| saved.port == cfg.port);
+    if let Some(saved) = saved {
+        state.active_target_id = saved.active_target_id;
+        state.browser_pid = saved.browser_pid;
+        state.last_snapshots = saved.last_snapshots;
+    }
+
+    let result = state.handle(req).await;
+
+    let saved = PersistedState {
+        port: cfg.port,
+        active_target_id: state.active_target_id.take(),
+        browser_pid: state.browser_pid,
+        last_snapshots: std::mem::take(&mut state.last_snapshots),
+    };
+    std::fs::write(cfg.state_path(), serde_json::to_vec(&saved)?)
+        .with_context(|| format!("failed to write {}", cfg.state_path().display()))?;
+
+    Ok(Outcome {
+        result,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        phases: std::mem::take(&mut state.phases),
+    })
 }
 
 struct SessionState {
@@ -96,7 +118,7 @@ struct SessionState {
     active_target_id: Option<String>,
     cdp: Option<CdpClient>,
     last_snapshots: HashMap<String, String>,
-    should_stop: bool,
+    browser_pid: Option<u32>,
     defer_snap: bool,
     step_label: Option<String>,
     phases: Vec<Phase>,
@@ -115,7 +137,7 @@ fn action_snap_opts(diff: bool) -> SnapOptions {
 }
 
 impl SessionState {
-    fn new(cfg: &DaemonConfig) -> Self {
+    fn new(cfg: &Config) -> Self {
         Self {
             port: cfg.port,
             headless: cfg.headless,
@@ -125,22 +147,24 @@ impl SessionState {
             active_target_id: None,
             cdp: None,
             last_snapshots: HashMap::new(),
-            should_stop: false,
+            browser_pid: None,
             defer_snap: false,
             step_label: None,
             phases: Vec::new(),
         }
     }
 
-    fn apply_launch(&mut self, launch: LaunchConfig) {
-        if launch.port != self.port {
-            self.port = launch.port;
-            self.cdp = None;
+    async fn ensure_browser(&mut self, headless: bool) -> Result<()> {
+        let policy = LaunchPolicy {
+            headless,
+            ..self.launch_policy()
+        };
+        if let Some(pid) = browser::ensure_browser(self.port, &policy).await? {
+            self.browser_pid = Some(pid);
             self.active_target_id = None;
             self.last_snapshots.clear();
         }
-        self.headless = launch.headless;
-        self.attach_only = launch.attach_only;
+        Ok(())
     }
 
     fn launch_policy(&self) -> LaunchPolicy<'_> {
@@ -170,7 +194,7 @@ impl SessionState {
 
         let start = Instant::now();
         self.cdp = None;
-        browser::ensure_browser(self.port, &self.launch_policy()).await?;
+        self.ensure_browser(self.headless).await?;
 
         let mut targets = browser::list_page_targets(self.port).await?;
         if targets.is_empty() {
@@ -267,18 +291,34 @@ impl SessionState {
                 };
                 let browser_info = ver.map(|v| v.browser).unwrap_or_else(|| not_running.into());
                 Ok(format!(
-                    "daemon: running (pid {})\ncdp_port: {}\nattach_only: {}\nbrowser: {}\ntabs: {}\nactive_tab: {}\n",
-                    std::process::id(),
+                    "cdp_port: {}\nattach_only: {}\nbrowser: {}\nlaunched_by_surf: {}\ntabs: {}\nactive_tab: {}\n",
                     self.port,
                     self.attach_only,
                     browser_info,
+                    self.browser_pid
+                        .map_or_else(|| "no".to_string(), |pid| format!("pid {pid}")),
                     tabs.len(),
                     self.active_target_id.as_deref().unwrap_or("none")
                 ))
             }
             Request::Stop => {
-                self.should_stop = true;
-                Ok("daemon stopping\n".into())
+                let Some(pid) = self.browser_pid.take() else {
+                    return Ok("no surf-launched browser recorded; nothing to stop\n".into());
+                };
+                self.cdp = None;
+                self.active_target_id = None;
+                self.last_snapshots.clear();
+                if browser::close_browser_if_launched(self.port, pid).await? {
+                    Ok(format!(
+                        "closed browser (pid {pid}) on 127.0.0.1:{}\n",
+                        self.port
+                    ))
+                } else {
+                    Ok(format!(
+                        "browser on 127.0.0.1:{} is not the one surf launched (pid {pid}); left it running\n",
+                        self.port
+                    ))
+                }
             }
             Request::Open { url, snap } => {
                 let normalized = normalize_url(&url);
@@ -420,7 +460,7 @@ impl SessionState {
                 Ok(format!("saved {out_path}\n"))
             }
             Request::Tabs => {
-                browser::ensure_browser(self.port, &self.launch_policy()).await?;
+                self.ensure_browser(self.headless).await?;
                 let tabs = browser::list_page_targets(self.port).await?;
                 let mut out = String::new();
                 for (i, t) in tabs.iter().enumerate() {
@@ -444,20 +484,16 @@ impl SessionState {
                 self.take_snap(&SnapOptions::default()).await
             }
             Request::Login { url } => {
-                let policy = LaunchPolicy {
-                    headless: false,
-                    ..self.launch_policy()
-                };
-                browser::ensure_browser(self.port, &policy).await?;
+                self.ensure_browser(false).await?;
                 let snap = Box::pin(self.handle(Request::TabNew { url })).await?;
                 Ok(format!(
-                    "sign in using the opened window. Cookies persist in the browser profile ({profile} when surf launches the browser); later runs, headless included, reuse them.\nno window? the browser already on 127.0.0.1:{port} is headless: stop it (e.g. `pkill -f 'user-data-dir={profile}'`) and rerun `surf login`.\n{snap}",
+                    "sign in using the opened window. Cookies persist in the browser profile ({profile} when surf launches the browser); later runs, headless included, reuse them.\nno window? the browser already on 127.0.0.1:{port} is headless: run `surf stop` and rerun `surf login`.\n{snap}",
                     profile = self.profile_dir.display(),
                     port = self.port
                 ))
             }
             Request::TabNew { url } => {
-                browser::ensure_browser(self.port, &self.launch_policy()).await?;
+                self.ensure_browser(self.headless).await?;
                 let normalized = url.as_deref().map(normalize_url);
                 let target = browser::open_new_tab(self.port, normalized.as_deref()).await?;
                 let url_ignored = target.url.is_empty() || target.url == "about:blank";
@@ -488,6 +524,7 @@ impl SessionState {
                         .ok_or_else(|| anyhow!("no open tabs"))?,
                 };
                 browser::close_tab(self.port, &target.id).await?;
+                self.last_snapshots.remove(&target.id);
                 if self.active_target_id.as_deref() == Some(&target.id) {
                     self.active_target_id = None;
                     self.cdp = None;
@@ -706,157 +743,9 @@ fn decode_base64(input: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
-    std::fs::create_dir_all(&cfg.home_dir)?;
-    let sock_path = cfg.socket_path();
-    if sock_path.exists() {
-        let _ = std::fs::remove_file(&sock_path);
-    }
-
-    let listener = UnixListener::bind(&sock_path)
-        .with_context(|| format!("failed to bind Unix socket {}", sock_path.display()))?;
-    std::fs::write(cfg.pid_path(), std::process::id().to_string())?;
-
-    let state = Arc::new(Mutex::new(SessionState::new(&cfg)));
-
-    loop {
-        tokio::select! {
-            accept_res = listener.accept() => {
-                let (stream, _) = accept_res?;
-                let state = Arc::clone(&state);
-                let stop = handle_conn(stream, state).await;
-                if stop {
-                    break;
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                break;
-            }
-        }
-    }
-
-    let _ = std::fs::remove_file(&sock_path);
-    let _ = std::fs::remove_file(cfg.pid_path());
-    Ok(())
-}
-
-async fn handle_conn(stream: UnixStream, state: Arc<Mutex<SessionState>>) -> bool {
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let start = Instant::now();
-        let resp = match serde_json::from_str::<Envelope>(&line) {
-            Ok(Envelope { req, launch }) => {
-                let mut guard = state.lock().await;
-                if let Some(launch) = launch {
-                    guard.apply_launch(launch);
-                }
-                let res = guard.handle(req).await;
-                let elapsed_ms = start.elapsed().as_millis() as u64;
-                let mut resp = match res {
-                    Ok(out) => Response::ok(out, elapsed_ms),
-                    Err(e) => Response::err(e.to_string(), elapsed_ms),
-                };
-                resp.phases = std::mem::take(&mut guard.phases);
-                resp
-            }
-            Err(e) => Response::err(
-                format!("invalid request JSON: {e}"),
-                start.elapsed().as_millis() as u64,
-            ),
-        };
-
-        let mut payload = serde_json::to_string(&resp).unwrap_or_else(|_| {
-            r#"{"ok":false,"error":"failed to serialize response"}"#.to_string()
-        });
-        payload.push('\n');
-        if writer.write_all(payload.as_bytes()).await.is_err() {
-            break;
-        }
-
-        if state.lock().await.should_stop {
-            return true;
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn cfg_with_home(home: &str) -> DaemonConfig {
-        DaemonConfig {
-            port: 9222,
-            headless: false,
-            attach_only: false,
-            home_dir: PathBuf::from(home),
-        }
-    }
-
-    #[test]
-    fn rejects_socket_path_over_unix_limit() {
-        let long_home = "h".repeat(MAX_UNIX_SOCKET_PATH_BYTES);
-        let err = cfg_with_home(&long_home)
-            .check_socket_path()
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains(&format!(
-                "exceeds unix limit {MAX_UNIX_SOCKET_PATH_BYTES} bytes"
-            )),
-            "{err}"
-        );
-        assert!(err.contains("SURF_HOME"), "{err}");
-        assert!(cfg_with_home("/tmp/surf").check_socket_path().is_ok());
-    }
-
-    #[test]
-    fn envelope_accepts_requests_with_and_without_launch() {
-        let env: Envelope = serde_json::from_str(
-            r#"{"cmd":"status","launch":{"port":9333,"headless":true,"attach_only":true}}"#,
-        )
-        .unwrap();
-        assert!(matches!(env.req, Request::Status));
-        assert_eq!(env.launch.unwrap().port, 9333);
-
-        let env: Envelope = serde_json::from_str(r#"{"cmd":"click","ref_id":3}"#).unwrap();
-        assert!(matches!(env.req, Request::Click { ref_id: 3, .. }));
-        assert!(env.launch.is_none());
-    }
-
-    #[test]
-    fn launch_config_from_request_overrides_daemon_start_flags() {
-        let cfg = DaemonConfig {
-            port: 9222,
-            headless: false,
-            attach_only: false,
-            home_dir: PathBuf::from("/tmp/surf"),
-        };
-        let mut state = SessionState::new(&cfg);
-        state.active_target_id = Some("t1".into());
-        state.last_snapshots.insert("t1".into(), "snap".into());
-
-        state.apply_launch(LaunchConfig {
-            port: 9222,
-            headless: true,
-            attach_only: true,
-        });
-        assert!(state.attach_only && state.headless);
-        assert_eq!(state.active_target_id.as_deref(), Some("t1"));
-
-        state.apply_launch(LaunchConfig {
-            port: 9333,
-            headless: true,
-            attach_only: true,
-        });
-        assert_eq!(state.port, 9333);
-        assert!(state.active_target_id.is_none() && state.last_snapshots.is_empty());
-    }
 
     #[test]
     fn fill_confirmation_echoes_dom_value() {
