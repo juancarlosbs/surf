@@ -32,7 +32,7 @@ jobs:
         run: |
           name=surf-${{ matrix.target }}
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/surf" README.md SKILL.md "dist/$name/"
+          cp "target/${{ matrix.target }}/release/surf" README.md skills/surf/SKILL.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
