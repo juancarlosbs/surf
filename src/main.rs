@@ -1,19 +1,14 @@
 mod browser;
 mod cdp;
 mod cli;
-mod daemon;
 mod protocol;
+mod session;
 mod snapshot;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Command, command_to_request};
-use daemon::DaemonConfig;
-use protocol::{Envelope, Request, Response};
-use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use cli::{Cli, command_to_request};
+use session::{Config, Outcome};
 
 #[tokio::main]
 async fn main() {
@@ -25,134 +20,24 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let home_dir = browser::surf_home_dir()?;
-    let cfg = DaemonConfig {
+    let cfg = Config {
         port: cli.port,
         headless: cli.headless,
         attach_only: cli.attach_only,
-        home_dir,
+        home_dir: browser::surf_home_dir()?,
     };
-    cfg.check_socket_path()?;
-
-    if let Command::Daemon { foreground } = cli.command {
-        if foreground {
-            return daemon::run_daemon(cfg).await;
-        }
-        let mut daemon = spawn_daemon(&cfg)?;
-        wait_for_socket(&cfg, &mut daemon).await?;
-        println!("surf daemon started on {}", cfg.socket_path().display());
-        return Ok(());
-    }
-
     let req = command_to_request(cli.command)?;
-    let resp = send_request(&cfg, req).await?;
-
+    let outcome = session::run(&cfg, req).await?;
     if cli.timing {
-        print_timing(&resp);
+        print_timing(&outcome);
     }
-
-    if resp.ok {
-        if let Some(out) = resp.output {
-            print!("{out}");
-        }
-        Ok(())
-    } else {
-        bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()))
-    }
+    print!("{}", outcome.result?);
+    Ok(())
 }
 
-fn print_timing(resp: &Response) {
-    if let Some(ms) = resp.elapsed_ms {
-        eprintln!("[surf: {ms}ms]");
-    }
-    for phase in &resp.phases {
+fn print_timing(outcome: &Outcome) {
+    eprintln!("[surf: {}ms]", outcome.elapsed_ms);
+    for phase in &outcome.phases {
         eprintln!("  {} {:.1}ms", phase.name, phase.us as f64 / 1000.0);
     }
-}
-
-async fn send_request(cfg: &DaemonConfig, req: Request) -> Result<Response> {
-    let sock_path = cfg.socket_path();
-
-    let stream = match UnixStream::connect(&sock_path).await {
-        Ok(s) => s,
-        Err(_) => {
-            if matches!(req, Request::Stop) {
-                return Ok(Response::ok("daemon not running\n", 0));
-            }
-            let mut daemon = spawn_daemon(cfg)?;
-            wait_for_socket(cfg, &mut daemon).await?
-        }
-    };
-
-    let (reader, mut writer) = stream.into_split();
-    let envelope = Envelope {
-        req,
-        launch: Some(cfg.launch()),
-    };
-    let mut payload = serde_json::to_string(&envelope)?;
-    payload.push('\n');
-    writer.write_all(payload.as_bytes()).await?;
-
-    let mut line = String::new();
-    let mut buf = BufReader::new(reader);
-    buf.read_line(&mut line).await?;
-    if line.trim().is_empty() {
-        bail!("daemon closed connection without response");
-    }
-
-    serde_json::from_str(&line).context("failed to parse daemon response")
-}
-
-fn spawn_daemon(cfg: &DaemonConfig) -> Result<Child> {
-    let exe = std::env::current_exe().context("failed to locate current surf binary")?;
-    std::fs::create_dir_all(&cfg.home_dir)
-        .with_context(|| format!("failed to create {}", cfg.home_dir.display()))?;
-    let log_path = cfg.log_path();
-    let log = std::fs::File::create(&log_path)
-        .with_context(|| format!("failed to create daemon log {}", log_path.display()))?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--port")
-        .arg(cfg.port.to_string())
-        .arg("daemon")
-        .arg("--foreground")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(log);
-
-    if cfg.headless {
-        cmd.arg("--headless");
-    }
-    if cfg.attach_only {
-        cmd.arg("--attach");
-    }
-
-    cmd.spawn().context("failed to spawn surf daemon")
-}
-
-async fn wait_for_socket(cfg: &DaemonConfig, daemon: &mut Child) -> Result<UnixStream> {
-    let sock_path = cfg.socket_path();
-    let start = Instant::now();
-    let timeout = Duration::from_secs(3);
-    while start.elapsed() < timeout {
-        if let Ok(stream) = UnixStream::connect(&sock_path).await {
-            return Ok(stream);
-        }
-        if let Ok(Some(status)) = daemon.try_wait() {
-            bail!(
-                "daemon exited ({status}) before listening on {}; {}",
-                sock_path.display(),
-                daemon_log_tail(cfg)
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    bail!(
-        "daemon_boot_timeout=3000ms exceeded waiting for {}; {}",
-        sock_path.display(),
-        daemon_log_tail(cfg)
-    )
-}
-
-fn daemon_log_tail(cfg: &DaemonConfig) -> String {
-    browser::log_tail("daemon", &cfg.log_path())
 }

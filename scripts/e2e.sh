@@ -112,6 +112,22 @@ check "tab close" "$out" "closed tab form"
 out=$(run eval "document.title")
 check "reconnects after active tab closed" "$out" "page two"
 
+out=$( (run eval "1+1" & run eval "2+2" & wait) )
+check "concurrent commands both succeed" "$out" "4"
+check "concurrent commands both succeed (2)" "$out" "2"
+
+out=$(run stop)
+check "stop closes surf-launched browser" "$out" "closed browser"
+out=$(run --attach tabs)
+check "browser gone after stop" "$out" "no CDP browser listening"
+
+run open "$fixtures/form.html" >/dev/null
+sed -E 's/"browser_pid":[0-9]+/"browser_pid":1/' "$home/state.json" >"$home/state.tmp" && mv "$home/state.tmp" "$home/state.json"
+out=$(run stop)
+check "stop leaves a browser surf did not launch" "$out" "left it running"
+out=$(run eval "1+2")
+check "browser still up after refused stop" "$out" "3"
+
 if ((failures > 0)); then
     echo "$failures e2e check(s) failed"
     exit 1

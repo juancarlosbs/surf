@@ -1,11 +1,11 @@
 ---
 name: surf
-description: Fast, low-token browser automation via `surf` CLI (persistent CDP daemon). Use whenever you need to browse, click, fill forms, inspect web apps, or interact with the user's Chrome session.
+description: Fast, low-token browser automation via `surf` CLI (Chrome DevTools Protocol). Use whenever you need to browse, click, fill forms, inspect web apps, or interact with the user's Chrome session.
 ---
 
 # surf — Fast Browser Automation for Agents
 
-Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chrome daemon over CDP and returns compact `@ref` snapshots (~300 tokens) and diffs (~40 tokens).
+Prefer `surf` over screenshot-based browser tools. It drives a local Chromium browser over CDP and returns compact `@ref` snapshots (~300 tokens) and diffs (~40 tokens).
 
 ## Core Workflow
 
@@ -19,7 +19,7 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
    ```bash
    surf run 'fill @1 "my query"' 'click @2' 'wait idle' 'snap --diff'
    ```
-   Or skip the initial `surf snap` and `wait` turns completely with semantic label commands (`click-label` / `fill-label`), which auto-wait up to 5s and resolve visible elements directly in the daemon by `aria-label`, `placeholder`, `<label>`, or `innerText`:
+   Or skip the initial `surf snap` and `wait` turns completely with semantic label commands (`click-label` / `fill-label`), which auto-wait up to 5s and resolve visible elements in the page by `aria-label`, `placeholder`, `<label>`, or `innerText`:
    ```bash
    surf run 'open https://example.com' 'fill-label "Search" "rust cdp"' 'click-label "Submit"'
    ```
@@ -53,7 +53,7 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 | `surf run "<step1>" "<step2>" ...` | Execute batch in 1 roundtrip |
 | `surf eval "<js>"` | Evaluate JS expression |
 | `surf tabs` / `surf tab <idx\|new\|close>` | Manage browser tabs |
-| `surf status` / `surf stop` | Daemon status / shutdown |
+| `surf status` / `surf stop` | Session status / close the browser surf launched |
 | `surf login [url]` | Open a window on the surf profile so the user can sign in once (ask the user to do it) |
 | `surf --attach ...` (`SURF_ATTACH_ONLY=1`) | Never launch a browser; fail fast if none listens on the CDP port |
 | `surf --timing ...` | Print total + per-step/per-phase timing to stderr |
@@ -61,7 +61,7 @@ Prefer `surf` over screenshot-based browser tools. It talks to a warm local Chro
 ## Notes
 - Action diffs (`click`, `fill`, ...) cover interactive elements only; page text comes only from `surf open` / `surf snap`.
 - Inside `surf run`, only the last step (and explicit `snap` steps) take a snapshot. Refs from your last snapshot stay valid until the page navigates or re-renders that element. After an `open` (or `tab`) inside a batch, use `click-label`/`fill-label` or add a `snap` step before using `@N`.
-- `--attach`, `--headless` and `--port` apply to each command, even when the daemon is already running.
+- `--attach`, `--headless` and `--port` apply to each command.
 - Driving an existing browser (e.g. Dia/Chrome on 9222)? Set `SURF_ATTACH_ONLY=1` and `SURF_PORT` in the agent environment instead of passing `--attach` per call: a command without it may auto-launch a separate browser.
 
 ## Safety (logged-in sessions)

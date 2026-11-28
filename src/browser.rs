@@ -14,6 +14,8 @@ const CDP_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 // Receipts: cold boot to first /json/version 867ms on an M-series mac; 0.56s to 26.2s on fresh
 // GitHub ubuntu runners (cold disk, 16 samples, PR #36). ~2.3x the worst healthy boot.
 const BROWSER_BOOT_TIMEOUT: Duration = Duration::from_secs(60);
+// Receipt (2026-11-28, M-series mac, headless Chrome 158): Browser.close to port released 62-66ms.
+const BROWSER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +32,51 @@ pub struct Target {
 pub struct BrowserVersion {
     #[serde(rename = "Browser")]
     pub browser: String,
+    #[serde(rename = "webSocketDebuggerUrl", default)]
+    pub web_socket_debugger_url: Option<String>,
+}
+
+/// Closes the browser on `port` only if its browser process is `pid` (one surf launched).
+pub async fn close_browser_if_launched(port: u16, pid: u32) -> Result<bool> {
+    let Ok(ver) = get_version(port).await else {
+        return Ok(false);
+    };
+    let ws_url = ver.web_socket_debugger_url.ok_or_else(|| {
+        anyhow!("CDP /json/version on 127.0.0.1:{port} has no webSocketDebuggerUrl")
+    })?;
+    let client = crate::cdp::CdpClient::connect(&ws_url).await?;
+    let info = client
+        .call("SystemInfo.getProcessInfo", serde_json::json!({}))
+        .await?;
+    let browser_pid = info
+        .get("processInfo")
+        .and_then(|v| v.as_array())
+        .and_then(|procs| {
+            procs
+                .iter()
+                .find(|p| p.get("type").and_then(|t| t.as_str()) == Some("browser"))
+        })
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_u64());
+    if browser_pid != Some(pid as u64) {
+        return Ok(false);
+    }
+    let _ = client.call("Browser.close", serde_json::json!({})).await;
+    drop(client);
+
+    let start = Instant::now();
+    while start.elapsed() < BROWSER_CLOSE_TIMEOUT {
+        if let Err(e) = get_version(port).await
+            && io_error_kind(&e) == Some(std::io::ErrorKind::ConnectionRefused)
+        {
+            return Ok(true);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    bail!(
+        "browser_close_timeout={}ms: browser (pid {pid}) still holds 127.0.0.1:{port} after Browser.close",
+        BROWSER_CLOSE_TIMEOUT.as_millis()
+    )
 }
 
 pub fn surf_home_dir() -> Result<PathBuf> {
@@ -303,9 +350,10 @@ pub fn log_tail(label: &str, path: &Path) -> String {
     format!("{label} log {}:\n{}", path.display(), &log[start..])
 }
 
-pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<BrowserVersion> {
+/// Returns the pid of the browser it launched, or `None` when one was already listening.
+pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Option<u32>> {
     match get_version(port).await {
-        Ok(ver) => return Ok(ver),
+        Ok(_) => return Ok(None),
         Err(e) => {
             if let Some(blocked) = probe_failure_blocks_launch(port, e) {
                 return Err(blocked);
@@ -342,16 +390,19 @@ pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Brow
     if policy.headless {
         cmd.arg("--headless=new");
     }
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to launch browser {}", bin.display()))?;
+    let pid = child.id();
 
     let start = Instant::now();
     let mut last_err = None;
     while start.elapsed() < BROWSER_BOOT_TIMEOUT {
         match get_version(port).await {
-            Ok(ver) => return Ok(ver),
+            Ok(_) => return Ok(pid),
             Err(e) => last_err = Some(e),
         }
         if let Ok(Some(status)) = child.try_wait() {
