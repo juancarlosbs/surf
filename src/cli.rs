@@ -24,6 +24,10 @@ pub struct Cli {
     #[arg(long = "attach", env = "SURF_ATTACH_ONLY", value_parser = FalseyValueParser::new(), global = true)]
     pub attach_only: bool,
 
+    /// Session name: isolates active tab and diff baselines; non-default sessions get their own tab (env: SURF_SESSION)
+    #[arg(long, env = "SURF_SESSION", default_value = "default", global = true)]
+    pub session: String,
+
     /// Print total and per-phase/per-step timing to stderr
     #[arg(long, default_value_t = false, global = true)]
     pub timing: bool,

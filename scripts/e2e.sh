@@ -112,6 +112,18 @@ check "tab close" "$out" "closed tab form"
 out=$(run eval "document.title")
 check "reconnects after active tab closed" "$out" "page two"
 
+run --session a open "$fixtures/form.html" >/dev/null &
+run --session b open "$fixtures/next.html" >/dev/null &
+wait
+out=$(run --session a eval "document.title")
+check "session a keeps its own tab" "$out" "form"
+out=$(run --session b eval "document.title")
+check "session b keeps its own tab" "$out" "page two"
+out=$(run --session b status)
+check "status lists sessions" "$out" "sessions: a *b default"
+out=$(run --session "../x" status)
+check "invalid session name is rejected" "$out" "invalid session name"
+
 out=$( (run eval "1+1" & run eval "2+2" & wait) )
 check "concurrent commands both succeed" "$out" "4"
 check "concurrent commands both succeed (2)" "$out" "2"
@@ -122,10 +134,10 @@ out=$(run --attach tabs)
 check "browser gone after stop" "$out" "no CDP browser listening"
 
 run open "$fixtures/form.html" >/dev/null
-sed -E 's/"browser_pid":[0-9]+/"browser_pid":1/' "$home/state.json" >"$home/state.tmp" && mv "$home/state.tmp" "$home/state.json"
+sed -E 's/"pid":[0-9]+/"pid":1/' "$home/browser.json" >"$home/browser.tmp" && mv "$home/browser.tmp" "$home/browser.json"
 out=$(run stop)
 check "stop leaves a browser surf did not launch" "$out" "left it running"
-out=$(run eval "1+2")
+out=$(run --attach eval "1+2")
 check "browser still up after refused stop" "$out" "3"
 
 if ((failures > 0)); then

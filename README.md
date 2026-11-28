@@ -66,7 +66,19 @@ surf tabs
 
 ## How it works
 
-No daemon. Each `surf` command connects to the browser over CDP, runs, and exits (~1ms more than a warm daemon, see #14). The active tab and diff baselines live in `SURF_HOME/state.json`; a file lock serializes concurrent commands. `surf stop` closes the browser surf launched and never one it only attached to.
+No daemon. Each `surf` command connects to the browser over CDP, runs, and exits (~1ms more than a warm daemon, see #14). The active tab and diff baselines live in `SURF_HOME/sessions/<name>.json`; a per-session file lock serializes commands of one session. `surf stop` closes the browser surf launched and never one it only attached to.
+
+## Parallel agents
+
+Give each agent its own session so they do not switch each other's tab or diff baselines:
+
+```bash
+SURF_SESSION=research surf open https://example.com
+SURF_SESSION=checkout surf open https://shop.example.com   # gets its own tab
+surf status                                                # lists sessions
+```
+
+`default` keeps using the browser's current tab, which is what you want when attaching to your everyday browser. Other sessions open a dedicated tab on first use and reopen one if it was closed. All sessions share one browser.
 
 ## Environment Variables
 
@@ -74,7 +86,8 @@ No daemon. Each `surf` command connects to the browser over CDP, runs, and exits
 - `SURF_HEADLESS` — launch headless when auto-starting (`1`/`0`, `true`/`false`)
 - `SURF_ATTACH_ONLY` — never launch a browser, only attach (`1`/`0`)
 - `SURF_BROWSER` — custom Chromium binary path
-- `SURF_HOME` — session state (`state.json`), `browser.log` and persistent profile directory (default: `~/.surf`)
+- `SURF_HOME` — session state (`sessions/`), launched-browser record (`browser.json`), `browser.log` and persistent profile directory (default: `~/.surf`)
+- `SURF_SESSION` — session name (default `default`); see below
 - `SURF_TIMEOUT_MS` — per-CDP-call timeout in ms (default: `15000`)
 
 ## Development
