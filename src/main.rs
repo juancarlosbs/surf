@@ -154,13 +154,5 @@ async fn wait_for_socket(cfg: &DaemonConfig, daemon: &mut Child) -> Result<UnixS
 }
 
 fn daemon_log_tail(cfg: &DaemonConfig) -> String {
-    const TAIL_BYTES: usize = 2000;
-    let log_path = cfg.log_path();
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    let log = log.trim();
-    if log.is_empty() {
-        return format!("daemon log {} is empty", log_path.display());
-    }
-    let start = log.floor_char_boundary(log.len().saturating_sub(TAIL_BYTES));
-    format!("daemon log {}:\n{}", log_path.display(), &log[start..])
+    browser::log_tail("daemon", &cfg.log_path())
 }

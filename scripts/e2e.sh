@@ -46,6 +46,13 @@ out=$(run --attach open "$fixtures/form.html")
 check "attach-only fails fast" "$out" "no CDP browser listening on 127.0.0.1:$port"
 run stop >/dev/null
 
+start=$(date +%s)
+out=$(SURF_BROWSER=/usr/bin/false run tabs)
+check "dead browser fails fast" "$out" "browser exited"
+elapsed=$(($(date +%s) - start))
+check "dead browser fails within 5s (took ${elapsed}s)" "$((elapsed < 5))" "1"
+run stop >/dev/null
+
 out=$(run --timing open "$fixtures/form.html")
 echo "$out" | grep -E '^\[surf|^  ' | sed 's/^/     boot: /' || true
 check "open lists inputs" "$out" '@1 [input:text] "Search"'
