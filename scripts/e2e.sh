@@ -15,7 +15,11 @@ unset SURF_ATTACH_ONLY
 cleanup() {
     "$surf" stop >/dev/null 2>&1 || true
     pkill -f "user-data-dir=$home/profile" 2>/dev/null || true
-    rm -rf "$home"
+    for _ in $(seq 50); do
+        pgrep -f "user-data-dir=$home/profile" >/dev/null || break
+        sleep 0.1
+    done
+    rm -rf "$home" 2>/dev/null || echo "warning: could not remove $home"
 }
 trap cleanup EXIT
 
