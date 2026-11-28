@@ -24,6 +24,7 @@ async fn run() -> Result<()> {
         port: cli.port,
         headless: cli.headless,
         attach_only: cli.attach_only,
+        session: cli.session,
         home_dir: browser::surf_home_dir()?,
     };
     let req = command_to_request(cli.command)?;

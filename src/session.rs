@@ -35,20 +35,28 @@ const IDLE_QUIET_WINDOW: Duration = Duration::from_millis(350);
 const WAIT_TEXT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FILL_ECHO_MAX_CHARS: usize = 200;
 
+pub const DEFAULT_SESSION: &str = "default";
+const MAX_SESSION_NAME_CHARS: usize = 64;
+
 pub struct Config {
     pub port: u16,
     pub headless: bool,
     pub attach_only: bool,
+    pub session: String,
     pub home_dir: PathBuf,
 }
 
 impl Config {
+    fn sessions_dir(&self) -> PathBuf {
+        self.home_dir.join("sessions")
+    }
+
     fn state_path(&self) -> PathBuf {
-        self.home_dir.join("state.json")
+        self.sessions_dir().join(format!("{}.json", self.session))
     }
 
     fn lock_path(&self) -> PathBuf {
-        self.home_dir.join("state.lock")
+        self.sessions_dir().join(format!("{}.lock", self.session))
     }
 
     fn profile_dir(&self) -> PathBuf {
@@ -60,8 +68,33 @@ impl Config {
 struct PersistedState {
     port: u16,
     active_target_id: Option<String>,
-    browser_pid: Option<u32>,
     last_snapshots: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LaunchedBrowser {
+    port: u16,
+    pid: u32,
+}
+
+fn validate_session_name(name: &str) -> Result<()> {
+    let valid_chars = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if name.is_empty() || name.len() > MAX_SESSION_NAME_CHARS || !valid_chars {
+        bail!(
+            "invalid session name {name:?}: use 1-{MAX_SESSION_NAME_CHARS} chars of [A-Za-z0-9_-]"
+        );
+    }
+    Ok(())
+}
+
+fn lock_file(path: &std::path::Path) -> Result<std::fs::File> {
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("failed to lock {}", path.display()))?;
+    Ok(file)
 }
 
 pub struct Outcome {
@@ -70,15 +103,13 @@ pub struct Outcome {
     pub phases: Vec<Phase>,
 }
 
-/// Runs one request in this process. The state file lock serializes concurrent surf commands.
+/// Runs one request in this process. A per-session file lock serializes commands of one session.
 pub async fn run(cfg: &Config, req: Request) -> Result<Outcome> {
     let start = Instant::now();
-    std::fs::create_dir_all(&cfg.home_dir)
-        .with_context(|| format!("failed to create {}", cfg.home_dir.display()))?;
-    let lock = std::fs::File::create(cfg.lock_path())
-        .with_context(|| format!("failed to open {}", cfg.lock_path().display()))?;
-    lock.lock()
-        .with_context(|| format!("failed to lock {}", cfg.lock_path().display()))?;
+    validate_session_name(&cfg.session)?;
+    std::fs::create_dir_all(cfg.sessions_dir())
+        .with_context(|| format!("failed to create {}", cfg.sessions_dir().display()))?;
+    let _session_lock = lock_file(&cfg.lock_path())?;
 
     let mut state = SessionState::new(cfg);
     let saved = std::fs::read(cfg.state_path())
@@ -87,7 +118,6 @@ pub async fn run(cfg: &Config, req: Request) -> Result<Outcome> {
         .filter(|saved| saved.port == cfg.port);
     if let Some(saved) = saved {
         state.active_target_id = saved.active_target_id;
-        state.browser_pid = saved.browser_pid;
         state.last_snapshots = saved.last_snapshots;
     }
 
@@ -96,7 +126,6 @@ pub async fn run(cfg: &Config, req: Request) -> Result<Outcome> {
     let saved = PersistedState {
         port: cfg.port,
         active_target_id: state.active_target_id.take(),
-        browser_pid: state.browser_pid,
         last_snapshots: std::mem::take(&mut state.last_snapshots),
     };
     std::fs::write(cfg.state_path(), serde_json::to_vec(&saved)?)
@@ -118,7 +147,10 @@ struct SessionState {
     active_target_id: Option<String>,
     cdp: Option<CdpClient>,
     last_snapshots: HashMap<String, String>,
-    browser_pid: Option<u32>,
+    session: String,
+    sessions_dir: PathBuf,
+    launched_path: PathBuf,
+    launch_lock_path: PathBuf,
     defer_snap: bool,
     step_label: Option<String>,
     phases: Vec<Phase>,
@@ -147,7 +179,10 @@ impl SessionState {
             active_target_id: None,
             cdp: None,
             last_snapshots: HashMap::new(),
-            browser_pid: None,
+            session: cfg.session.clone(),
+            sessions_dir: cfg.sessions_dir(),
+            launched_path: cfg.home_dir.join("browser.json"),
+            launch_lock_path: cfg.home_dir.join("browser.lock"),
             defer_snap: false,
             step_label: None,
             phases: Vec::new(),
@@ -159,12 +194,44 @@ impl SessionState {
             headless,
             ..self.launch_policy()
         };
+        let _launch_lock = lock_file(&self.launch_lock_path)?;
         if let Some(pid) = browser::ensure_browser(self.port, &policy).await? {
-            self.browser_pid = Some(pid);
+            let launched = LaunchedBrowser {
+                port: self.port,
+                pid,
+            };
+            std::fs::write(&self.launched_path, serde_json::to_vec(&launched)?)
+                .with_context(|| format!("failed to write {}", self.launched_path.display()))?;
             self.active_target_id = None;
             self.last_snapshots.clear();
         }
         Ok(())
+    }
+
+    fn launched_browser(&self) -> Option<LaunchedBrowser> {
+        std::fs::read(&self.launched_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<LaunchedBrowser>(&raw).ok())
+            .filter(|b| b.port == self.port)
+    }
+
+    fn session_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&self.sessions_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension()? == "json")
+                    .then(|| path.file_stem()?.to_str().map(String::from))
+                    .flatten()
+            })
+            .collect();
+        if !names.contains(&self.session) {
+            names.push(self.session.clone());
+        }
+        names.sort();
+        names
     }
 
     fn launch_policy(&self) -> LaunchPolicy<'_> {
@@ -196,18 +263,17 @@ impl SessionState {
         self.cdp = None;
         self.ensure_browser(self.headless).await?;
 
-        let mut targets = browser::list_page_targets(self.port).await?;
-        if targets.is_empty() {
-            let t = browser::open_new_tab(self.port, Some("about:blank")).await?;
-            targets.push(t);
-        }
-
-        let target = self
+        let targets = browser::list_page_targets(self.port).await?;
+        let active = self
             .active_target_id
             .as_ref()
             .and_then(|active_id| targets.iter().find(|t| &t.id == active_id))
-            .unwrap_or(&targets[0])
-            .clone();
+            .cloned();
+        let target = match active {
+            Some(target) => target,
+            None if self.session == DEFAULT_SESSION && !targets.is_empty() => targets[0].clone(),
+            None => browser::open_new_tab(self.port, Some("about:blank")).await?,
+        };
 
         let ws_url = target
             .web_socket_debugger_url
@@ -290,21 +356,35 @@ impl SessionState {
                     "not running (will auto-launch)"
                 };
                 let browser_info = ver.map(|v| v.browser).unwrap_or_else(|| not_running.into());
+                let sessions = self
+                    .session_names()
+                    .into_iter()
+                    .map(|name| {
+                        if name == self.session {
+                            format!("*{name}")
+                        } else {
+                            name
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 Ok(format!(
-                    "cdp_port: {}\nattach_only: {}\nbrowser: {}\nlaunched_by_surf: {}\ntabs: {}\nactive_tab: {}\n",
+                    "cdp_port: {}\nattach_only: {}\nbrowser: {}\nlaunched_by_surf: {}\ntabs: {}\nsession: {}\nactive_tab: {}\nsessions: {sessions}\n",
                     self.port,
                     self.attach_only,
                     browser_info,
-                    self.browser_pid
-                        .map_or_else(|| "no".to_string(), |pid| format!("pid {pid}")),
+                    self.launched_browser()
+                        .map_or_else(|| "no".to_string(), |b| format!("pid {}", b.pid)),
                     tabs.len(),
+                    self.session,
                     self.active_target_id.as_deref().unwrap_or("none")
                 ))
             }
             Request::Stop => {
-                let Some(pid) = self.browser_pid.take() else {
+                let Some(LaunchedBrowser { pid, .. }) = self.launched_browser() else {
                     return Ok("no surf-launched browser recorded; nothing to stop\n".into());
                 };
+                let _ = std::fs::remove_file(&self.launched_path);
                 self.cdp = None;
                 self.active_target_id = None;
                 self.last_snapshots.clear();
@@ -746,6 +826,15 @@ fn decode_base64(input: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_names_are_validated() {
+        assert!(validate_session_name("agent-1_b").is_ok());
+        let err = validate_session_name("../x").unwrap_err().to_string();
+        assert!(err.contains("[A-Za-z0-9_-]"), "{err}");
+        assert!(validate_session_name("").is_err());
+        assert!(validate_session_name(&"a".repeat(MAX_SESSION_NAME_CHARS + 1)).is_err());
+    }
 
     #[test]
     fn fill_confirmation_echoes_dom_value() {
