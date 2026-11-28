@@ -93,6 +93,9 @@ pub enum Request {
     TabSwitch {
         index: usize,
     },
+    Login {
+        url: Option<String>,
+    },
     TabNew {
         url: Option<String>,
     },

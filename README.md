@@ -30,23 +30,39 @@ surf open https://news.ycombinator.com
 surf run 'click @3' 'wait idle' 'snap --diff'
 ```
 
-## Attach to Your Real Chrome Session
+## Use Your Logged-In Browser
 
-Start Chrome with remote debugging enabled (or point `SURF_PORT` to an existing debugging port):
+surf drives a Chromium browser over CDP. Pick one setup:
+
+### A. surf profile (recommended)
+
+surf launches its own browser with a persistent profile (`~/.surf/profile`). Sign in once, with a window:
 
 ```bash
+surf login https://github.com/login   # opens a window; sign in, then close it or keep it
+surf open https://github.com          # later runs reuse the cookies, headless included
+```
+
+If `surf login` shows no window, a headless browser from an earlier run already owns the port: stop it (`pkill -f 'user-data-dir='"$HOME"'/.surf/profile'`) and rerun.
+
+### B. Your everyday browser
+
+Start it with remote debugging, then attach:
+
+```bash
+# Chrome / Brave / Edge: since Chrome 136, --remote-debugging-port is ignored on the
+# default profile, so it needs a separate --user-data-dir (sign in there once).
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.surf/profile"
+  --remote-debugging-port=9222 --user-data-dir="$HOME/.chrome-surf"
+
+# Dia, Arc and other Chromium browsers: quit it, then relaunch with the flag.
+"/Applications/Dia.app/Contents/MacOS/Dia" --remote-debugging-port=9222
+
+export SURF_ATTACH_ONLY=1 SURF_PORT=9222   # never launch a second browser
+surf tabs
 ```
 
-`surf` automatically attaches to any CDP listener on `SURF_PORT` (default `9222`) without spawning a second browser. Pass `--attach` (or `SURF_ATTACH_ONLY=1`) to never launch one: surf fails fast with `no CDP browser listening on 127.0.0.1:<port>` instead. If the port accepts connections but is not a CDP endpoint, surf fails with the original error rather than launching a browser that cannot bind it.
-
-Flags apply per command, so for agents set it once in the environment:
-
-```bash
-export SURF_ATTACH_ONLY=1 SURF_PORT=9222
-```
+`surf` attaches to any CDP listener on `SURF_PORT` (default `9222`). With `--attach` (or `SURF_ATTACH_ONLY=1`) it never launches one and fails fast with `no CDP browser listening on 127.0.0.1:<port>`. If the port accepts connections but is not a CDP endpoint, surf fails with the original error rather than launching a browser that cannot bind it. Flags apply per command, so agents should set the env vars once.
 
 ## Environment Variables
 

@@ -301,7 +301,7 @@ pub async fn ensure_browser(port: u16, policy: &LaunchPolicy<'_>) -> Result<Brow
 
     if policy.attach_only {
         bail!(
-            "no CDP browser listening on 127.0.0.1:{port} (attach-only mode via --attach/SURF_ATTACH_ONLY; start your browser with --remote-debugging-port={port})"
+            "no CDP browser listening on 127.0.0.1:{port} (attach-only mode via --attach/SURF_ATTACH_ONLY; start your browser with --remote-debugging-port={port}; setup: https://github.com/juancarlosbs/surf#use-your-logged-in-browser)"
         );
     }
 

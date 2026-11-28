@@ -70,6 +70,10 @@ check "wait text" "$out" "found text: Done"
 out=$("$surf" eval "document.title")
 check "eval" "$out" "page two"
 
+out=$("$surf" login "$fixtures/form.html")
+check "login opens tab with sign-in hint" "$out" "sign in using the opened window"
+"$surf" tab close >/dev/null
+
 out=$("$surf" tab new "$fixtures/form.html")
 check "tab new opens url" "$out" "title: form"
 out=$("$surf" tabs)

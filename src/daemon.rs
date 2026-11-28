@@ -417,6 +417,19 @@ impl SessionState {
                 self.cdp = None;
                 self.take_snap(&SnapOptions::default()).await
             }
+            Request::Login { url } => {
+                let policy = LaunchPolicy {
+                    headless: false,
+                    ..self.launch_policy()
+                };
+                browser::ensure_browser(self.port, &policy).await?;
+                let snap = Box::pin(self.handle(Request::TabNew { url })).await?;
+                Ok(format!(
+                    "sign in using the opened window. Cookies persist in the browser profile ({profile} when surf launches the browser); later runs, headless included, reuse them.\nno window? the browser already on 127.0.0.1:{port} is headless: stop it (e.g. `pkill -f 'user-data-dir={profile}'`) and rerun `surf login`.\n{snap}",
+                    profile = self.profile_dir.display(),
+                    port = self.port
+                ))
+            }
             Request::TabNew { url } => {
                 browser::ensure_browser(self.port, &self.launch_policy()).await?;
                 let normalized = url.as_deref().map(normalize_url);
