@@ -7,11 +7,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 
-// Receipts (2026-11-27, M-series mac, headless Chrome): loopback discovery round trip <6ms,
-// cold boot to first /json/version 867ms. Limits sit >100x / ~11x past those as tripwires.
+// Receipts (2026-11-27, M-series mac, headless Chrome): loopback discovery round trip <6ms.
+// Limits sit >100x past it as tripwires.
 const CDP_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
-const BROWSER_BOOT_TIMEOUT: Duration = Duration::from_secs(10);
+// Receipts: cold boot to first /json/version 867ms on an M-series mac; 0.56s to 26.2s on fresh
+// GitHub ubuntu runners (cold disk, 16 samples, PR #36). ~2.3x the worst healthy boot.
+const BROWSER_BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

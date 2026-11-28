@@ -15,9 +15,20 @@ unset SURF_ATTACH_ONLY
 cleanup() {
     "$surf" stop >/dev/null 2>&1 || true
     pkill -f "user-data-dir=$home/profile" 2>/dev/null || true
-    rm -rf "$home"
+    for _ in $(seq 50); do
+        pgrep -f "user-data-dir=$home/profile" >/dev/null || break
+        sleep 0.1
+    done
+    rm -rf "$home" 2>/dev/null || echo "warning: could not remove $home"
 }
 trap cleanup EXIT
+
+run() {
+    local rc=0 out
+    out=$("$surf" "$@" 2>&1) || rc=$?
+    printf '%s' "$out"
+    if ((rc != 0)); then printf '\n[surf %s exited %d]' "$*" "$rc"; fi
+}
 
 failures=0
 check() {
@@ -31,57 +42,58 @@ check() {
     fi
 }
 
-out=$("$surf" --attach open "$fixtures/form.html" 2>&1 || true)
+out=$(run --attach open "$fixtures/form.html")
 check "attach-only fails fast" "$out" "no CDP browser listening on 127.0.0.1:$port"
-"$surf" stop >/dev/null
+run stop >/dev/null
 
-out=$("$surf" --timing open "$fixtures/form.html" 2>&1)
+out=$(run --timing open "$fixtures/form.html")
+echo "$out" | grep -E '^\[surf|^  ' | sed 's/^/     boot: /' || true
 check "open lists inputs" "$out" '@1 [input:text] "Search"'
 check "open includes page text" "$out" "footer text"
 check "timing shows phases" "$out" "navigate"
 
-out=$("$surf" fill-label Search "rust cdp")
+out=$(run fill-label Search "rust cdp")
 check "fill-label echoes DOM value" "$out" 'filled "Search" val="rust cdp"'
 
-out=$("$surf" fill-label "Post text" hello)
+out=$(run fill-label "Post text" hello)
 check "fill-label contenteditable" "$out" 'filled "Post text" val="hello"'
 
-out=$("$surf" fill @1 abc)
+out=$(run fill @1 abc)
 check "fill by ref" "$out" 'filled @1 val="abc"'
 
-out=$("$surf" click-label Go)
+out=$(run click-label Go)
 check "click diff shows new element" "$out" '+ @4 [btn] "Undo"'
 check "click diff omits page text" "$out" "footer text" absent
 
-out=$("$surf" snap --diff)
+out=$(run snap --diff)
 check "snap --diff unchanged" "$out" "(no visible changes)"
 
-out=$("$surf" --timing run "fill-label Search xyz" "click-label Go" 2>&1)
+out=$(run --timing run "fill-label Search xyz" "click-label Go")
 check "batch defers intermediate snapshot" "$out" "step1/2 snapshot" absent
 check "batch final diff" "$out" 'val="xyz"'
 
-out=$("$surf" run "open $fixtures/next.html" "click-label Next")
+out=$(run run "open $fixtures/next.html" "click-label Next")
 check "batch with navigation returns full snapshot" "$out" "title: page two"
 check "batch with navigation is not a diff" "$out" "- @" absent
 
-out=$("$surf" wait "text:Done")
+out=$(run wait "text:Done")
 check "wait text" "$out" "found text: Done"
 
-out=$("$surf" eval "document.title")
+out=$(run eval "document.title")
 check "eval" "$out" "page two"
 
-out=$("$surf" login "$fixtures/form.html")
+out=$(run login "$fixtures/form.html")
 check "login opens tab with sign-in hint" "$out" "sign in using the opened window"
-"$surf" tab close >/dev/null
+run tab close >/dev/null
 
-out=$("$surf" tab new "$fixtures/form.html")
+out=$(run tab new "$fixtures/form.html")
 check "tab new opens url" "$out" "title: form"
-out=$("$surf" tabs)
+out=$(run tabs)
 check "tabs lists both" "$out" "[1]"
-out=$("$surf" tab close)
+out=$(run tab close)
 check "tab close" "$out" "closed tab form"
 
-out=$("$surf" eval "document.title")
+out=$(run eval "document.title")
 check "reconnects after active tab closed" "$out" "page two"
 
 if ((failures > 0)); then
