@@ -18,6 +18,14 @@ Fast, ultra-low-token browser automation CLI for AI agents (Claude Code, Codex, 
 curl -fsSL https://raw.githubusercontent.com/juancarlosbs/surf/main/scripts/install.sh | sh
 ```
 
+Claude Code: install the plugin (skill + a startup check that offers to install the CLI when it is missing):
+
+```
+/plugin install surf --marketplace juancarlosbs/surf
+```
+
+Other agents: copy [`skills/surf/SKILL.md`](skills/surf/SKILL.md) into the agent's skills or instructions.
+
 Prebuilt for macOS (arm64, x64) and Linux (x64, arm64; static musl). Installs to `~/.local/bin` (`SURF_INSTALL_DIR` to change, `SURF_VERSION=v0.1.0` to pin). From source: `cargo install --git https://github.com/juancarlosbs/surf`.
 
 ## Quick Start

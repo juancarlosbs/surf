@@ -1,0 +1,12 @@
+{
+  "name": "surf",
+  "description": "Fast, low-token browser automation for agents: compact @ref snapshots, diffs and batched actions over CDP, driven by the surf CLI.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Juan Carlos",
+    "url": "https://github.com/juancarlosbs"
+  },
+  "homepage": "https://github.com/juancarlosbs/surf",
+  "repository": "https://github.com/juancarlosbs/surf",
+  "keywords": ["browser", "automation", "cdp", "chrome", "agents"]
+}

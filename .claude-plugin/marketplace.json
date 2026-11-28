@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "surf",
+  "description": "Fast, low-token browser automation CLI for AI agents.",
+  "owner": {
+    "name": "Juan Carlos"
+  },
+  "plugins": [
+    {
+      "name": "surf",
+      "description": "Browse, click, fill forms and inspect web apps with the surf CLI (~300-token snapshots, ~40-token diffs).",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
