@@ -11,9 +11,9 @@ use tokio::process::Command;
 // Limits sit >100x past it as tripwires.
 const CDP_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
-// Receipts: cold boot to first /json/version 867ms on an M-series mac; 0.56s to >10.2s on fresh
-// GitHub ubuntu runners (cold disk; 10 samples, 3 over 10s, PR #36). ~3x the worst healthy boot.
-const BROWSER_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+// Receipts: cold boot to first /json/version 867ms on an M-series mac; 0.56s to 26.2s on fresh
+// GitHub ubuntu runners (cold disk, 16 samples, PR #36). ~2.3x the worst healthy boot.
+const BROWSER_BOOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
